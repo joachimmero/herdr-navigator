@@ -1,0 +1,13 @@
+[package]
+name = "herdr-md"
+version = "0.1.0"
+edition = "2024"
+description = "A herdr pane for reading markdown files beside the chat."
+publish = false
+
+[dependencies]
+ignore = "0.4"
+pulldown-cmark = { version = "0.13", default-features = false }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+serde_json = "1"
+unicode-width = "0.2"
