@@ -1,12 +1,13 @@
 # herdr-navigator
 
-A [herdr](https://herdr.dev) plugin that opens a pane for reading markdown files beside the chat.
+A [herdr](https://herdr.dev) plugin that opens a pane for browsing and reading a project beside
+the chat.
 
 - `herdr-navigator PLAN.md` shows a file in the workspace's pane, so you or a coding agent can put a
   doc where you can read it without leaving the terminal.
 - The pane follows the file. When it changes on disk, the pane rereads it and keeps your place.
   While the file is gone it keeps the last content and says the file is missing.
-- With no file to show, the pane lists the project's markdown files to pick from.
+- The project's files sit in a tree beside the file, which shows each file as you move onto it.
 - Headings, emphasis, lists and task lists, quotes, code blocks, rules, links (with their target
   shown), footnotes, and tables, which shrink their columns and wrap cells to fit the pane.
 - Any other file shows as its source, syntax-highlighted in the terminal's own colors, with line
@@ -33,7 +34,7 @@ toggle to a key in herdr's `config.toml`:
 key = "prefix+m"
 type = "plugin_action"
 command = "joachimmero.herdr-navigator.toggle"
-description = "toggle markdown reader"
+description = "toggle navigator"
 ```
 
 The pane opens as a split beside the focused pane, in that pane's directory.
@@ -60,29 +61,32 @@ In a file:
 | `Ctrl+d` `Ctrl+u` | Scroll half a page down, up |
 | `space` / `PgDn`, `PgUp` | Scroll a page down, up |
 | `g` `G` / `Home` `End` | Go to the top, the bottom |
-| `Esc` `o` | Go to the file list |
+| `Tab` `Esc` | Go to the tree |
 | `q` | Close the pane |
 
-In the file list:
+In the tree:
 
 | Key | Does |
 | --- | --- |
-| `j` `k` / `↓` `↑`, mouse wheel | Move |
+| `j` `k` / `↓` `↑`, mouse wheel | Move, showing each file as you land on it |
 | `Ctrl+d` `Ctrl+u` | Move half a page down, up |
-| `g` `G` / `Home` `End` | Go to the first, the last file |
-| `⏎` | Open the file |
-| `/` | Filter by path (`⏎` keeps it, `Esc` clears it, `⌫` on an empty filter leaves it) |
+| `g` `G` / `Home` `End` | Go to the first, the last entry |
+| `⏎` `l` `→`, click | Open or close a folder, or go into the file |
+| `h` `←` | Close the folder, or go to the one holding the entry |
+| `i` | Show or hide what git ignores |
+| `Tab` | Go to the file |
 | `r` | Look for files again |
 | `q` | Close the pane |
 
-## The file list
+## The tree
 
-It lists the `.md` and `.markdown` files under the git root of the pane's directory, or under the
-directory itself outside git, skipping what git ignores. It looks again each time you go back to
-it, keeping your filter and the file you had selected.
+It lists the files under the git root of the pane's directory, or under the directory itself
+outside git, folders first. What git ignores is hidden until you press `i`, then shown dim, and an
+ignored folder is only read when you open it. Below 70 columns only the tree or the file shows, and
+`Tab` swaps them.
 
 ## Limits
 
-- Links aren't followed; the picker is the way between docs.
+- Links aren't followed; the tree is the way between files.
 - Code blocks aren't syntax-highlighted.
 - Images show as their alt text, and raw HTML as dim source. HTML comments are hidden.

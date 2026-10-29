@@ -7,7 +7,7 @@ mod herdr;
 mod highlight;
 mod inbox;
 mod markdown;
-mod picker;
+mod tree;
 mod ui;
 
 use std::path::PathBuf;

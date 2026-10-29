@@ -8,90 +8,123 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::app::{App, Screen};
+use crate::app::{App, Focus};
 use crate::doc::Doc;
-use crate::picker::Picker;
+use crate::tree::{Row, Tree};
 
 /// The columns left blank on either side of the document.
 const MARGIN: u16 = 1;
+/// Below this width only the focused side shows.
+const NARROW: u16 = 70;
 
-/// The lines a page of content gets in a pane `height` rows tall, under its title bar.
-pub fn page_height(height: u16) -> usize {
-    usize::from(height.saturating_sub(1))
+/// Where each part of the pane goes: the title bar, and the tree and file where they show.
+pub struct Panes {
+    pub title: Rect,
+    pub tree: Option<Rect>,
+    pub file: Option<Rect>,
+}
+
+impl Panes {
+    /// The lines a page of the file takes.
+    pub fn page(&self) -> usize {
+        self.file.map_or(1, |file| usize::from(file.height).max(1))
+    }
+}
+
+pub fn panes(area: Rect, app: &App) -> Panes {
+    let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+    let (tree, file) = match (&app.doc, app.focus) {
+        (None, _) => (Some(body), None),
+        _ if body.width < NARROW => match app.focus {
+            Focus::Tree => (Some(body), None),
+            Focus::File => (None, Some(inset(body))),
+        },
+        _ => {
+            let width = (body.width / 3).clamp(24, 40);
+            let [tree, _rule, file] = Layout::horizontal([
+                Constraint::Length(width),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+            ])
+            .areas(body);
+            (Some(tree), Some(inset(file)))
+        }
+    };
+    Panes { title, tree, file }
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let [title, body] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(frame.area());
-    match &mut app.screen {
-        Screen::Picker => draw_picker(frame, &app.picker, title, body),
-        Screen::Doc(doc) => draw_doc(frame, doc, title, body),
+    let panes = panes(frame.area(), app);
+    if let (Some(tree), Some(_)) = (panes.tree, panes.file) {
+        let rule = Rect { x: tree.right(), width: 1, ..tree };
+        let bar = vec![Line::styled("│", dim()); usize::from(rule.height)];
+        frame.render_widget(Paragraph::new(bar), rule);
     }
+    if let Some(area) = panes.tree {
+        draw_tree(frame, &app.tree, area, app.focus == Focus::Tree);
+    }
+    let mut status = Vec::new();
+    if let (Some(area), Some(doc)) = (panes.file, &mut app.doc) {
+        status = draw_doc(frame, doc, area);
+    }
+    if app.tree.is_scanning() {
+        status.insert(0, Span::styled("scanning… ", dim()));
+    }
+    let mut left = vec![Span::styled(display_path(&app.tree.root), bold())];
+    if let Some(doc) = &app.doc {
+        let shown = doc.path.strip_prefix(&app.tree.root).unwrap_or(&doc.path);
+        left.extend([Span::styled(" › ", dim()), Span::raw(shown.display().to_string())]);
+    }
+    draw_title(frame, panes.title, left, status);
 }
 
-fn draw_picker(frame: &mut Frame, picker: &Picker, title: Rect, body: Rect) {
-    let matches = picker.matches();
-    let status = if picker.is_scanning() {
-        "scanning…".to_owned()
-    } else {
-        match matches.len() {
-            1 => "1 file".to_owned(),
-            count => format!("{count} files"),
-        }
-    };
-    let root = Span::styled(display_path(&picker.root), Style::new().add_modifier(Modifier::BOLD));
-    draw_title(frame, title, vec![root], vec![Span::raw(status)]);
-
-    let body = inset(body);
-    let show_filter = picker.editing_filter || !picker.filter.is_empty();
-    let [filter, list] =
-        Layout::vertical([Constraint::Length(u16::from(show_filter)), Constraint::Fill(1)])
-            .areas(body);
-    if show_filter {
-        let cursor = if picker.editing_filter { "▏" } else { "" };
-        let line = Line::from(vec![
-            Span::styled("/", dim()),
-            Span::raw(picker.filter.clone()),
-            Span::raw(cursor),
-        ]);
-        frame.render_widget(Paragraph::new(line), filter);
-    }
-
-    if matches.is_empty() && !picker.is_scanning() {
-        let hint = if picker.filter.is_empty() { "No markdown files here." } else { "No matches." };
-        frame.render_widget(Paragraph::new(Line::styled(hint, dim())), list);
+fn draw_tree(frame: &mut Frame, tree: &Tree, area: Rect, focused: bool) {
+    let rows = tree.rows();
+    if rows.is_empty() && !tree.is_scanning() {
+        frame.render_widget(Paragraph::new(Line::styled(" No files here.", dim())), area);
         return;
     }
-    let height = usize::from(list.height).max(1);
-    let offset = picker.offset.get();
-    let offset = offset.min(picker.selected).max((picker.selected + 1).saturating_sub(height));
-    picker.offset.set(offset);
-    let rows: Vec<Line> = matches
+    let height = usize::from(area.height).max(1);
+    let selected = tree.selected_index();
+    let offset = tree.offset.get().min(selected).max((selected + 1).saturating_sub(height));
+    tree.offset.set(offset);
+    let lines: Vec<Line> = rows
         .iter()
         .enumerate()
         .skip(offset)
         .take(height)
-        .map(|(index, file)| file_row(file, index == picker.selected))
+        .map(|(index, row)| tree_row(tree, row, index == selected, focused))
         .collect();
-    frame.render_widget(Paragraph::new(rows), list);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// A file's row, its directory dim beside its name.
-fn file_row(file: &Path, selected: bool) -> Line<'static> {
-    let name = file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let dir = file
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .map(|dir| format!("{}/", dir.display()))
-        .unwrap_or_default();
-    let line = Line::from(vec![Span::styled(dir, dim()), Span::raw(name)]);
-    if selected { line.style(Style::new().add_modifier(Modifier::REVERSED)) } else { line }
+fn tree_row(tree: &Tree, row: &Row, selected: bool, focused: bool) -> Line<'static> {
+    let node = row.node;
+    let marker = match (node.dir, tree.is_expanded(&node.path)) {
+        (true, true) => "▾ ",
+        (true, false) => "▸ ",
+        (false, _) => "  ",
+    };
+    let mut style = if node.dir { Style::new().fg(Color::Blue) } else { Style::new() };
+    if node.ignored {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    let line = Line::from(vec![
+        Span::raw(format!(" {}", "  ".repeat(row.depth))),
+        Span::styled(marker, dim()),
+        Span::styled(node.name.clone(), style),
+    ]);
+    match (selected, focused) {
+        (true, true) => line.style(Style::new().add_modifier(Modifier::REVERSED)),
+        (true, false) => line.style(Style::new().add_modifier(Modifier::UNDERLINED)),
+        (false, _) => line,
+    }
 }
 
-fn draw_doc(frame: &mut Frame, doc: &mut Doc, title: Rect, body: Rect) {
-    let body = inset(body);
-    let height = usize::from(body.height);
-    frame.render_widget(Paragraph::new(doc.page(body.width, height).to_vec()), body);
+/// Draw the file and return its part of the title bar's status.
+fn draw_doc(frame: &mut Frame, doc: &mut Doc, area: Rect) -> Vec<Span<'static>> {
+    let height = usize::from(area.height);
+    frame.render_widget(Paragraph::new(doc.page(area.width, height).to_vec()), area);
 
     let total = doc.len();
     let mut status = Vec::new();
@@ -102,8 +135,7 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, title: Rect, body: Rect) {
         let percent = (doc.scroll + height).min(total) * 100 / total;
         status.push(Span::styled(format!("{percent}%"), dim()));
     }
-    let name = Span::styled(display_path(&doc.path), Style::new().add_modifier(Modifier::BOLD));
-    draw_title(frame, title, vec![name], status);
+    status
 }
 
 fn draw_title(frame: &mut Frame, area: Rect, left: Vec<Span>, right: Vec<Span>) {
@@ -129,4 +161,8 @@ fn display_path(path: &Path) -> String {
 
 fn dim() -> Style {
     Style::new().add_modifier(Modifier::DIM)
+}
+
+fn bold() -> Style {
+    Style::new().add_modifier(Modifier::BOLD)
 }

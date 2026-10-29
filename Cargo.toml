@@ -2,7 +2,7 @@
 name = "herdr-navigator"
 version = "0.1.0"
 edition = "2024"
-description = "A herdr pane for reading markdown files beside the chat."
+description = "A herdr pane for browsing and reading a project beside the chat."
 publish = false
 
 [dependencies]

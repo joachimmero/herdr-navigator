@@ -7,24 +7,27 @@ use std::time::Duration;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
+use ratatui::layout::{Position, Rect};
 
 use crate::doc::Doc;
 use crate::herdr;
 use crate::inbox::Inbox;
-use crate::picker::Picker;
-use crate::ui;
+use crate::tree::Tree;
+use crate::ui::{self, Panes};
 
-pub enum Screen {
-    Picker,
-    Doc(Doc),
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Tree,
+    File,
 }
 
 pub struct App {
-    pub screen: Screen,
-    pub picker: Picker,
+    pub tree: Tree,
+    pub doc: Option<Doc>,
+    pub focus: Focus,
     /// Where `herdr-navigator <file>` posts files for this pane; `None` outside herdr.
     inbox: Option<Inbox>,
     quit: bool,
@@ -33,7 +36,7 @@ pub struct App {
 const TICK: Duration = Duration::from_millis(100);
 const WHEEL_LINES: isize = 3;
 
-/// Run the pane, showing `file` first when given and the picker otherwise, and return the
+/// Run the pane, showing `file` first when given and the tree otherwise, and return the
 /// process exit code.
 pub fn run(file: Option<PathBuf>) -> u8 {
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -44,7 +47,7 @@ pub fn run(file: Option<PathBuf>) -> u8 {
     }
     let mut terminal = ratatui::init();
     let _ = execute!(io::stdout(), EnableMouseCapture);
-    let outcome = App::new(Picker::new(&cwd), inbox, file).run(&mut terminal);
+    let outcome = App::new(Tree::new(&cwd), inbox, file).run(&mut terminal);
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     match outcome {
@@ -72,11 +75,11 @@ fn half_page_direction(key: &KeyEvent) -> Option<isize> {
 }
 
 impl App {
-    fn new(picker: Picker, inbox: Option<Inbox>, file: Option<PathBuf>) -> Self {
-        let mut app = Self { screen: Screen::Picker, picker, inbox, quit: false };
-        match file {
-            Some(file) => app.screen = Screen::Doc(Doc::open(file)),
-            None => app.show_picker(),
+    fn new(mut tree: Tree, inbox: Option<Inbox>, file: Option<PathBuf>) -> Self {
+        tree.rescan();
+        let mut app = Self { tree, doc: None, focus: Focus::Tree, inbox, quit: false };
+        if let Some(file) = file {
+            app.show(file);
         }
         app
     }
@@ -86,107 +89,117 @@ impl App {
             if let Some(file) = self.inbox.as_ref().and_then(Inbox::take) {
                 self.show(file);
             }
-            match &mut self.screen {
-                Screen::Picker => self.picker.poll(),
-                Screen::Doc(doc) => doc.refresh(),
+            self.tree.poll();
+            if let Some(doc) = &mut self.doc {
+                doc.refresh();
             }
-            let size = terminal.size()?;
             terminal.draw(|frame| ui::draw(frame, &mut self))?;
             if event::poll(TICK)? {
-                self.on_event(event::read()?, ui::page_height(size.height));
+                let size = terminal.size()?;
+                let panes = ui::panes(Rect::new(0, 0, size.width, size.height), &self);
+                self.on_event(event::read()?, &panes);
             }
         }
         Ok(())
     }
 
-    /// Show `file`, keeping the place in it when it is already showing.
+    /// Show `file`, keeping the place in it when it is already showing, and select it in the tree.
     fn show(&mut self, file: PathBuf) {
-        if !matches!(&self.screen, Screen::Doc(doc) if doc.path == file) {
-            self.screen = Screen::Doc(Doc::open(file));
+        self.tree.reveal(&file);
+        self.open(file);
+        self.focus = Focus::File;
+    }
+
+    fn open(&mut self, file: PathBuf) {
+        if !self.doc.as_ref().is_some_and(|doc| doc.path == file) {
+            self.doc = Some(Doc::open(file));
         }
     }
 
-    fn show_picker(&mut self) {
-        self.picker.rescan();
-        self.screen = Screen::Picker;
+    /// Show the tree's selection when it is a file.
+    fn follow_tree(&mut self) {
+        let file = self.tree.selected().filter(|node| !node.dir).map(|node| node.path.clone());
+        if let Some(file) = file {
+            self.open(self.tree.root.join(file));
+        }
     }
 
-    fn on_event(&mut self, event: Event, page: usize) {
+    fn on_event(&mut self, event: Event, panes: &Panes) {
         match event {
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key, page),
-            Event::Mouse(mouse) => {
-                let delta = match mouse.kind {
-                    MouseEventKind::ScrollDown => WHEEL_LINES,
-                    MouseEventKind::ScrollUp => -WHEEL_LINES,
-                    _ => return,
-                };
-                match &mut self.screen {
-                    Screen::Picker => self.picker.move_by(delta),
-                    Screen::Doc(doc) => doc.scroll_by(delta, page),
-                }
-            }
+            Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key, panes),
+            Event::Mouse(mouse) => self.on_mouse(mouse, panes),
             _ => {}
         }
     }
 
-    fn on_key(&mut self, key: KeyEvent, page: usize) {
-        if is_quit(&key) {
+    fn on_mouse(&mut self, mouse: MouseEvent, panes: &Panes) {
+        let at = Position::new(mouse.column, mouse.row);
+        let in_tree = panes.tree.is_some_and(|tree| tree.contains(at));
+        let delta = match mouse.kind {
+            MouseEventKind::ScrollDown => WHEEL_LINES,
+            MouseEventKind::ScrollUp => -WHEEL_LINES,
+            MouseEventKind::Down(MouseButton::Left) if in_tree => {
+                let tree = panes.tree.expect("the click landed in it");
+                let row = usize::from(at.y - tree.y) + self.tree.offset.get();
+                let again = row == self.tree.selected_index();
+                self.tree.select_index(row);
+                self.focus = Focus::Tree;
+                if again {
+                    self.tree.toggle();
+                }
+                self.follow_tree();
+                return;
+            }
+            _ => return,
+        };
+        match (in_tree, &mut self.doc) {
+            (true, _) => {
+                self.tree.move_by(delta);
+                self.follow_tree();
+            }
+            (false, Some(doc)) => doc.scroll_by(delta, panes.page()),
+            (false, None) => {}
+        }
+    }
+
+    fn on_key(&mut self, key: KeyEvent, panes: &Panes) {
+        if is_quit(&key) || key.code == KeyCode::Char('q') {
             self.quit = true;
             return;
         }
-        match &mut self.screen {
-            Screen::Picker if self.picker.editing_filter => self.on_filter_key(key),
-            Screen::Picker => self.on_picker_key(key, page),
-            Screen::Doc(doc) => match key.code {
-                KeyCode::Char('q') => self.quit = true,
-                KeyCode::Esc | KeyCode::Char('o') => self.show_picker(),
-                _ => on_doc_key(doc, key, page),
+        match (self.focus, &mut self.doc) {
+            (Focus::File, Some(doc)) => match key.code {
+                KeyCode::Tab | KeyCode::Esc => self.focus = Focus::Tree,
+                _ => on_doc_key(doc, key, panes.page()),
             },
+            _ => self.on_tree_key(key, panes.page()),
         }
     }
 
-    fn on_picker_key(&mut self, key: KeyEvent, page: usize) {
-        let picker = &mut self.picker;
+    fn on_tree_key(&mut self, key: KeyEvent, page: usize) {
+        let tree = &mut self.tree;
         if let Some(direction) = half_page_direction(&key) {
-            picker.move_by(direction * (page / 2).max(1) as isize);
+            tree.move_by(direction * (page / 2).max(1) as isize);
+            self.follow_tree();
             return;
         }
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('j') | KeyCode::Down => picker.move_by(1),
-            KeyCode::Char('k') | KeyCode::Up => picker.move_by(-1),
-            KeyCode::Char('g') | KeyCode::Home => picker.selected = 0,
-            KeyCode::Char('G') | KeyCode::End => picker.move_by(isize::MAX),
-            KeyCode::Char('/') => picker.editing_filter = true,
-            KeyCode::Char('r') => picker.rescan(),
-            KeyCode::Enter => {
-                if let Some(file) = picker.selected_file() {
-                    self.screen = Screen::Doc(Doc::open(picker.root.join(file)));
-                }
-            }
-            _ => {}
+            KeyCode::Char('j') | KeyCode::Down => tree.move_by(1),
+            KeyCode::Char('k') | KeyCode::Up => tree.move_by(-1),
+            KeyCode::Char('g') | KeyCode::Home => tree.select_index(0),
+            KeyCode::Char('G') | KeyCode::End => tree.move_by(isize::MAX),
+            KeyCode::Char('h') | KeyCode::Left => tree.collapse(),
+            KeyCode::Char('i') => tree.toggle_ignored(),
+            KeyCode::Char('r') => tree.rescan(),
+            KeyCode::Tab if self.doc.is_some() => self.focus = Focus::File,
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => match tree.selected() {
+                Some(node) if node.dir => tree.toggle(),
+                Some(_) => self.focus = Focus::File,
+                None => {}
+            },
+            _ => return,
         }
-    }
-
-    fn on_filter_key(&mut self, key: KeyEvent) {
-        let picker = &mut self.picker;
-        match key.code {
-            KeyCode::Esc => {
-                picker.set_filter(String::new());
-                picker.editing_filter = false;
-            }
-            KeyCode::Enter => picker.editing_filter = false,
-            KeyCode::Backspace if picker.filter.is_empty() => picker.editing_filter = false,
-            KeyCode::Backspace => {
-                let mut filter = picker.filter.clone();
-                filter.pop();
-                picker.set_filter(filter);
-            }
-            KeyCode::Down => picker.move_by(1),
-            KeyCode::Up => picker.move_by(-1),
-            KeyCode::Char(ch) => picker.set_filter(format!("{}{ch}", picker.filter)),
-            _ => {}
-        }
+        self.follow_tree();
     }
 }
 
