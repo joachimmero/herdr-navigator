@@ -23,7 +23,9 @@ use crate::field::Field;
 use crate::herdr::{self, Agent};
 use crate::inbox::Inbox;
 use crate::jumps::{Jumps, Place};
+use crate::layout::Lines;
 use crate::location::Location;
+use crate::search::{Outcome, Search, Searcher};
 use crate::tree::Tree;
 use crate::ui::{self, Panes};
 
@@ -46,6 +48,7 @@ pub enum Mode {
         agents: Vec<Agent>,
         selected: usize,
     },
+    Search(Box<Search>),
 }
 
 pub struct App {
@@ -59,6 +62,8 @@ pub struct App {
     /// A place pointed at while a comment was being written, which `⏎` goes to once it's done.
     pub pending: Option<Location>,
     jumps: Jumps,
+    /// Started the first time search opens.
+    searcher: Option<Searcher>,
     /// The pane the comments last went to, which the picker opens on.
     last_sent: Option<String>,
     /// Where `herdr-navigator <file>` posts files for this pane; `None` outside herdr.
@@ -67,6 +72,8 @@ pub struct App {
 }
 
 const TICK: Duration = Duration::from_millis(100);
+/// Quick enough that results show as soon as they're in.
+const SEARCH_TICK: Duration = Duration::from_millis(16);
 const WHEEL_LINES: isize = 3;
 
 /// Run the pane, showing `location` first when given and the tree otherwise, and return the
@@ -130,6 +137,7 @@ impl App {
             notice: None,
             pending: None,
             jumps: Jumps::default(),
+            searcher: None,
             last_sent: None,
             inbox,
             quit: false,
@@ -154,14 +162,31 @@ impl App {
             {
                 self.comments.reanchor(&doc.path, doc.text());
             }
+            self.pump_search();
             terminal.draw(|frame| ui::draw(frame, &mut self))?;
-            if event::poll(TICK)? {
+            let tick = if matches!(self.mode, Mode::Search(_)) { SEARCH_TICK } else { TICK };
+            if event::poll(tick)? {
                 let size = terminal.size()?;
                 let panes = ui::panes(Rect::new(0, 0, size.width, size.height), &self);
                 self.on_event(event::read()?, &panes);
             }
         }
         Ok(())
+    }
+
+    /// Take in the search's latest results, ask for the query's when it changed, and preview the
+    /// pick.
+    fn pump_search(&mut self) {
+        let (Mode::Search(search), Some(searcher)) = (&mut self.mode, &mut self.searcher) else {
+            return;
+        };
+        if let Some(outcome) = searcher.outcome() {
+            search.land(outcome);
+        }
+        if std::mem::take(&mut search.dirty) && !searcher.query(search.field.text.clone()) {
+            search.land(Outcome::Failed("search worker unavailable".into()));
+        }
+        search.follow_pick(&self.tree.root);
     }
 
     /// Show `location`'s file, with its lines marked when it names some.
@@ -206,8 +231,10 @@ impl App {
     }
 
     fn on_mouse(&mut self, mouse: MouseEvent, panes: &Panes) {
-        if !matches!(self.mode, Mode::Browse) {
-            return;
+        match self.mode {
+            Mode::Browse => {}
+            Mode::Search(_) => return self.on_search_mouse(mouse, panes),
+            _ => return,
         }
         let at = Position::new(mouse.column, mouse.row);
         let in_tree = panes.tree.is_some_and(|tree| tree.contains(at));
@@ -255,6 +282,7 @@ impl App {
         self.notice = None;
         match &mut self.mode {
             Mode::Picker { .. } => return self.on_picker_key(key),
+            Mode::Search(_) => return self.on_search_key(key, panes),
             Mode::Composing(composer) => {
                 if on_composer_key(&mut composer.field, key) {
                     self.finish_composing(key.code == KeyCode::Enter);
@@ -289,6 +317,7 @@ impl App {
             KeyCode::Char('N') => self.next_comment(false),
             KeyCode::Char('s') => self.send(),
             KeyCode::Char('y') => self.copy(),
+            KeyCode::Char('/') => self.open_search(),
             _ => match (self.focus, &mut self.doc) {
                 (Focus::File, Some(doc)) => match key.code {
                     KeyCode::Esc if doc.clear_selection() => {}
@@ -516,6 +545,78 @@ impl App {
         }
     }
 
+    fn open_search(&mut self) {
+        let root = self.tree.root.clone();
+        self.searcher.get_or_insert_with(|| Searcher::start(root));
+        self.mode = Mode::Search(Box::new(Search::new()));
+    }
+
+    fn on_search_key(&mut self, key: KeyEvent, panes: &Panes) {
+        let Mode::Search(search) = &mut self.mode else { return };
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let page = panes.search.as_ref().map_or(1, |screen| usize::from(screen.preview.height));
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Browse,
+            KeyCode::Enter => self.open_pick(),
+            KeyCode::Tab => search.flip(),
+            KeyCode::PageDown => search.scroll_preview(page as isize, page),
+            KeyCode::PageUp => search.scroll_preview(-(page as isize), page),
+            KeyCode::Down => search.move_pick(1),
+            KeyCode::Up => search.move_pick(-1),
+            KeyCode::Char('n') if control => search.move_pick(1),
+            KeyCode::Char('p') if control => search.move_pick(-1),
+            _ => {
+                let before = search.field.text.clone();
+                on_field_key(&mut search.field, key);
+                search.dirty |= search.field.text != before;
+            }
+        }
+    }
+
+    fn on_search_mouse(&mut self, mouse: MouseEvent, panes: &Panes) {
+        let (Mode::Search(search), Some(screen)) = (&mut self.mode, &panes.search) else {
+            return;
+        };
+        let at = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) if screen.chips.contains(at) => search.flip(),
+            MouseEventKind::Down(MouseButton::Left) if screen.list.contains(at) => {
+                let row = search.scroll.get() + usize::from(at.y - screen.list.y);
+                if search.pick_row(row) {
+                    self.open_pick();
+                }
+            }
+            MouseEventKind::ScrollDown if screen.list.contains(at) => search.move_pick(1),
+            MouseEventKind::ScrollUp if screen.list.contains(at) => search.move_pick(-1),
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                if screen.preview.contains(at) =>
+            {
+                let delta = match mouse.kind {
+                    MouseEventKind::ScrollDown => WHEEL_LINES,
+                    _ => -WHEEL_LINES,
+                };
+                search.scroll_preview(delta, usize::from(screen.preview.height));
+            }
+            _ => {}
+        }
+    }
+
+    /// Show the picked result, at its line for a code hit.
+    fn open_pick(&mut self) {
+        let Mode::Search(search) = &self.mode else { return };
+        let Some((path, line)) = search.target().map(|(path, line)| (path.to_owned(), line)) else {
+            return;
+        };
+        let file = self.tree.root.join(&path);
+        if !file.is_file() {
+            return;
+        }
+        if let Some(searcher) = &self.searcher {
+            searcher.track(path);
+        }
+        self.go(Location { file, lines: line.map(Lines::one) });
+    }
+
     fn on_tree_key(&mut self, key: KeyEvent, page: usize) {
         let tree = &mut self.tree;
         if let Some(direction) = half_page_direction(&key) {
@@ -551,16 +652,23 @@ fn on_composer_key(field: &mut Field, key: KeyEvent) -> bool {
         KeyCode::Enter if newline => field.insert('\n'),
         KeyCode::Char('j') if control => field.insert('\n'),
         KeyCode::Enter | KeyCode::Esc => return true,
+        _ => on_field_key(field, key),
+    }
+    false
+}
+
+/// Edit `field` the way any typed text is edited.
+fn on_field_key(field: &mut Field, key: KeyEvent) {
+    match key.code {
         KeyCode::Backspace => field.backspace(),
         KeyCode::Delete => field.delete(),
         KeyCode::Left => field.left(),
         KeyCode::Right => field.right(),
         KeyCode::Home => field.home(),
         KeyCode::End => field.end(),
-        KeyCode::Char(ch) if !control => field.insert(ch),
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => field.insert(ch),
         _ => {}
     }
-    false
 }
 
 fn on_doc_key(doc: &mut Doc, key: KeyEvent, page: usize) {

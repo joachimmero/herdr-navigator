@@ -15,6 +15,7 @@ use crate::composer::{Composer, Target};
 use crate::doc::Doc;
 use crate::herdr::Agent;
 use crate::layout::Lines;
+use crate::search::{CodeHit, Kind, Phase, ResultRow, Search};
 use crate::tree::{Row, Tree};
 
 /// The columns left blank on either side of the document.
@@ -22,11 +23,24 @@ const MARGIN: u16 = 1;
 /// Below this width only the focused side shows.
 const NARROW: u16 = 70;
 
-/// Where each part of the pane goes: the title bar, and the tree and file where they show.
+/// Where each part of the pane goes: the title bar, and the tree and file or the search screen
+/// where they show.
 pub struct Panes {
     pub title: Rect,
     pub tree: Option<Rect>,
     pub file: Option<Rect>,
+    pub search: Option<SearchPanes>,
+}
+
+/// Where each part of the search screen goes.
+pub struct SearchPanes {
+    /// The query, and the chips naming each kind of result on its right.
+    pub band: Rect,
+    pub chips: Rect,
+    pub results_rule: Rect,
+    pub list: Rect,
+    pub preview_rule: Rect,
+    pub preview: Rect,
 }
 
 impl Panes {
@@ -38,6 +52,10 @@ impl Panes {
 
 pub fn panes(area: Rect, app: &App) -> Panes {
     let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+    if let Mode::Search(search) = &app.mode {
+        let search = Some(search_panes(body, search));
+        return Panes { title, tree: None, file: None, search };
+    }
     let (tree, file) = match (&app.doc, app.focus) {
         (None, _) => (Some(body), None),
         _ if body.width < NARROW => match app.focus {
@@ -55,7 +73,37 @@ pub fn panes(area: Rect, app: &App) -> Panes {
             (Some(tree), Some(inset(file)))
         }
     };
-    Panes { title, tree, file }
+    Panes { title, tree, file, search: None }
+}
+
+fn search_panes(body: Rect, search: &Search) -> SearchPanes {
+    let [band, results_rule, list, preview_rule, preview] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Percentage(40),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(body);
+    let [files, code] = chip_labels(search);
+    let width = u16::try_from(files.width() + CHIP_GAP.width() + code.width()).unwrap_or(u16::MAX);
+    let width = width.min(band.width);
+    let chips = Rect { x: band.right() - width, width, ..band };
+    SearchPanes { band, chips, results_rule, list, preview_rule, preview: inset(preview) }
+}
+
+const CHIP_GAP: &str = " │ ";
+
+/// The chips' labels, with counts once results are in.
+fn chip_labels(search: &Search) -> [String; 2] {
+    if search.phase != Phase::Ready {
+        return ["files".into(), "code".into()];
+    }
+    let more = if search.results.code_more { "+" } else { "" };
+    [
+        format!("files {}", search.results.file_total),
+        format!("code {}{more}", search.results.code.len()),
+    ]
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -67,6 +115,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if let Some(area) = panes.tree {
         draw_tree(frame, &app.tree, area, app.focus == Focus::Tree);
+    }
+    if let (Mode::Search(search), Some(screen)) = (&mut app.mode, &panes.search) {
+        draw_search(frame, search, &app.comments, &app.tree.root, screen);
     }
     let mut status = Vec::new();
     match (&app.mode, panes.file.or(panes.tree)) {
@@ -315,6 +366,186 @@ fn draw_picker(frame: &mut Frame, agents: &[Agent], selected: usize, area: Rect)
         .padding(ratatui::widgets::Padding::horizontal(1));
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+fn draw_search(
+    frame: &mut Frame,
+    search: &mut Search,
+    comments: &Comments,
+    root: &Path,
+    screen: &SearchPanes,
+) {
+    let prompt = Span::styled("> ", Style::new().fg(Color::Cyan));
+    let (rows, (_, column)) = search.field.rows(usize::MAX);
+    let query = match rows.into_iter().next().filter(|query| !query.is_empty()) {
+        Some(query) => Span::raw(query),
+        None => Span::styled("Search files and code…", dim()),
+    };
+    let band =
+        Rect { width: screen.band.width.saturating_sub(screen.chips.width + 1), ..screen.band };
+    let caret = u16::try_from(prompt.width() + column).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(Line::from(vec![prompt, query])), band);
+    frame.set_cursor_position((band.x + caret.min(band.width.saturating_sub(1)), band.y));
+
+    let chip = |kind: Kind| {
+        if search.kind == kind {
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            dim()
+        }
+    };
+    let [files, code] = chip_labels(search);
+    let chips = Line::from(vec![
+        Span::styled(files, chip(Kind::Files)),
+        Span::styled(CHIP_GAP, dim()),
+        Span::styled(code, chip(Kind::Code)),
+    ]);
+    frame.render_widget(Paragraph::new(chips), screen.chips);
+
+    frame.render_widget(
+        Paragraph::new(rule("results", screen.results_rule.width)),
+        screen.results_rule,
+    );
+    draw_results(frame, search, screen.list);
+
+    let label = match &search.preview {
+        Some(doc) => {
+            format!("preview · {}", doc.path.strip_prefix(root).unwrap_or(&doc.path).display())
+        }
+        None => "preview".into(),
+    };
+    frame.render_widget(
+        Paragraph::new(rule(&label, screen.preview_rule.width)),
+        screen.preview_rule,
+    );
+    match &mut search.preview {
+        Some(doc) => {
+            draw_doc(frame, doc, comments, None, screen.preview, false);
+        }
+        None => {
+            frame.render_widget(Paragraph::new(Line::styled("no preview", dim())), screen.preview)
+        }
+    }
+}
+
+/// A rule across `width` columns, titled `label`.
+fn rule(label: &str, width: u16) -> Line<'static> {
+    let label = format!("─ {label} ");
+    let rest = usize::from(width).saturating_sub(label.width());
+    Line::styled(format!("{label}{}", "─".repeat(rest)), dim())
+}
+
+fn draw_results(frame: &mut Frame, search: &Search, area: Rect) {
+    let rows = search.rows();
+    let message = match &search.phase {
+        Phase::Indexing => Some(Line::styled("indexing…", dim())),
+        Phase::Failed(error) => Some(Line::styled(error.clone(), Style::new().fg(Color::Red))),
+        // An empty query asks for no code, so it found none to report.
+        Phase::Ready
+            if rows.is_empty()
+                && search.kind == Kind::Code
+                && search.field.text.trim().is_empty() =>
+        {
+            Some(Line::raw(""))
+        }
+        Phase::Ready if rows.is_empty() => Some(Line::styled("no matches", dim())),
+        Phase::Ready => None,
+    };
+    if let Some(message) = message {
+        frame.render_widget(Paragraph::new(message), area);
+        return;
+    }
+    let height = usize::from(area.height).max(1);
+    let picked = rows.iter().position(|row| row.pick() == Some(search.pick)).unwrap_or(0);
+    let scroll = search.scroll.get().min(picked).max((picked + 1).saturating_sub(height));
+    search.scroll.set(scroll);
+    let width = usize::from(area.width);
+    let lines: Vec<Line> = rows
+        .iter()
+        .skip(scroll)
+        .take(height)
+        .map(|row| {
+            let line = match row {
+                ResultRow::Header(index) => {
+                    let path = search.results.code[*index].path.clone();
+                    Line::styled(path, Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD))
+                }
+                ResultRow::File(index) => {
+                    let hit = &search.results.files[*index];
+                    Line::from(emphasized(&hit.path, &hit.spans))
+                }
+                ResultRow::Code(index) => code_row(&search.results.code[*index], width),
+                ResultRow::More => Line::styled("… more", dim()),
+            };
+            if row.pick() == Some(search.pick) {
+                line.style(Style::new().add_modifier(Modifier::REVERSED))
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// A code hit's line number and text, cut at the front when that's what it takes to show the
+/// first match.
+fn code_row(hit: &CodeHit, width: usize) -> Line<'static> {
+    let number = format!("{:>5}: ", hit.line);
+    let room = width.saturating_sub(number.width());
+    let (text, spans) = expand_tabs(hit.text.trim_end(), &hit.spans);
+    let first = spans.first().map_or(0, |&(start, _)| start as usize).min(text.len());
+    let first = (0..=first).rev().find(|&at| text.is_char_boundary(at)).unwrap_or(0);
+    let head = text[..first].width();
+    // Keep at most a third of the row's room of what comes before the match.
+    let cut = if head + 8 > room && room > 8 {
+        let keep = room / 3;
+        let mut remaining = text[..first].char_indices().scan(head, |left, (at, ch)| {
+            let here = (at, *left);
+            *left -= unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            Some(here)
+        });
+        remaining.find(|&(_, left)| left <= keep).map_or(first, |(at, _)| at)
+    } else {
+        0
+    };
+    let shifted: Vec<(u32, u32)> = spans
+        .iter()
+        .filter(|&&(_, end)| end as usize > cut)
+        .map(|&(start, end)| ((start as usize).saturating_sub(cut) as u32, end - cut as u32))
+        .collect();
+    let mut line = vec![Span::styled(number, dim())];
+    if cut > 0 {
+        line.push(Span::styled("…", dim()));
+    }
+    line.extend(emphasized(&text[cut..], &shifted));
+    Line::from(line)
+}
+
+/// `text` with each tab as four spaces, and `spans` into it moved to match.
+fn expand_tabs(text: &str, spans: &[(u32, u32)]) -> (String, Vec<(u32, u32)>) {
+    let tabs: Vec<usize> = text.match_indices('\t').map(|(at, _)| at).collect();
+    // Each tab before an offset adds three bytes.
+    let shift = |at: u32| at + (tabs.partition_point(|&tab| tab < at as usize) * 3) as u32;
+    let spans = spans.iter().map(|&(start, end)| (shift(start), shift(end))).collect();
+    (text.replace('\t', "    "), spans)
+}
+
+/// `text` cut into spans, the bytes in `spans` marked as matches.
+fn emphasized(text: &str, spans: &[(u32, u32)]) -> Vec<Span<'static>> {
+    let matched =
+        |at: usize| spans.iter().any(|&(start, end)| (start as usize..end as usize).contains(&at));
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    for (at, ch) in text.char_indices() {
+        let hit = matched(at);
+        match runs.last_mut() {
+            Some((last, run)) if *last == hit => run.push(ch),
+            _ => runs.push((hit, ch.to_string())),
+        }
+    }
+    let style = |hit: bool| {
+        if hit { Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::new() }
+    };
+    runs.into_iter().map(|(hit, run)| Span::styled(run, style(hit))).collect()
 }
 
 fn draw_title(frame: &mut Frame, area: Rect, left: Vec<Span>, right: Vec<Span>) {

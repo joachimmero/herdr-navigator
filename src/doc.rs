@@ -55,6 +55,8 @@ pub struct Doc {
     goto: Option<usize>,
     /// Lines pointed at from outside, marked until the cursor leaves them.
     pointed: Option<Lines>,
+    /// Whether the next layout puts the cursor in the middle of the page.
+    centering: bool,
 }
 
 impl Doc {
@@ -73,6 +75,7 @@ impl Doc {
             anchor: None,
             goto: None,
             pointed: None,
+            centering: false,
         };
         doc.refresh();
         doc
@@ -154,6 +157,9 @@ impl Doc {
                 last.map_or(self.cursor, |last| last.min(self.cursor + height.saturating_sub(1)));
             self.scroll = self.scroll.max((bottom + 1).saturating_sub(height));
         }
+        if std::mem::take(&mut self.centering) {
+            self.scroll = self.cursor.saturating_sub(height / 2);
+        }
         self.move_cursor(0, height);
         if !self.is_pointed(self.cursor) {
             self.pointed = None;
@@ -213,6 +219,11 @@ impl Doc {
     pub fn point(&mut self, lines: Lines) {
         self.go_to_line(lines.first);
         self.pointed = Some(lines);
+    }
+
+    /// Put the cursor's row in the middle of the page when the page is next drawn.
+    pub fn center(&mut self) {
+        self.centering = true;
     }
 
     /// Whether row `index` shows part of the lines pointed at.

@@ -6,6 +6,7 @@ description = "A herdr pane for browsing and reading a project beside the chat."
 publish = false
 
 [dependencies]
+fff-search = "0.11.0"
 ignore = "0.4"
 notify = "=9.0.0-rc.5"
 pulldown-cmark = { version = "0.13", default-features = false }

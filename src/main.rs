@@ -13,6 +13,7 @@ mod jumps;
 mod layout;
 mod location;
 mod markdown;
+mod search;
 mod tree;
 mod ui;
 mod watch;
