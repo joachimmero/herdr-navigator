@@ -119,6 +119,7 @@ fn half_page_direction(key: &KeyEvent) -> Option<isize> {
 impl App {
     fn new(mut tree: Tree, inbox: Option<Inbox>, location: Option<Location>) -> Self {
         tree.rescan();
+        tree.watch();
         let mut app = Self {
             tree,
             doc: None,

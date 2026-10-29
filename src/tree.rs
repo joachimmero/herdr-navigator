@@ -9,6 +9,8 @@ use std::thread;
 
 use ignore::WalkBuilder;
 
+use crate::watch::Watch;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
     /// Relative to the tree's root.
@@ -32,6 +34,9 @@ pub struct Tree {
     pub root: PathBuf,
     children: Children,
     scan: Option<Receiver<Children>>,
+    watch: Option<Watch>,
+    /// Something it lists changed since the scan in progress began.
+    stale: bool,
     expanded: BTreeSet<PathBuf>,
     pub show_ignored: bool,
     /// The selected node's path: a rescan keeps the selection on it while it exists.
@@ -48,6 +53,8 @@ impl Tree {
             root: find_root(dir),
             children: Children::new(),
             scan: None,
+            watch: None,
+            stale: false,
             expanded: BTreeSet::new(),
             show_ignored: false,
             selected: None,
@@ -66,19 +73,33 @@ impl Tree {
         self.scan = Some(receiver);
     }
 
+    /// Look for files again whenever something changes on disk in a folder the tree lists.
+    pub fn watch(&mut self) {
+        self.watch = Watch::start(&self.root);
+    }
+
     /// Take a finished scan's files, keeping the selection where it still exists and the expanded
-    /// ignored folders filled in.
+    /// ignored folders filled in, and start another when what the tree lists changed meanwhile.
     pub fn poll(&mut self) {
-        let Some(Ok(children)) = self.scan.as_ref().map(Receiver::try_recv) else { return };
-        self.scan = None;
-        self.children = children;
-        let ignored: Vec<PathBuf> = self.expanded.iter().cloned().collect();
-        ignored.iter().for_each(|dir| self.fill_ignored(dir));
-        let rows = self.rows();
-        let kept =
-            self.selected.as_ref().is_some_and(|path| rows.iter().any(|r| r.node.path == *path));
-        if !kept {
-            self.selected = rows.first().map(|row| row.node.path.clone());
+        let listed = |path: &Path| self.children.contains_key(path.parent().unwrap_or(path));
+        self.stale |= self.watch.as_ref().is_some_and(|watch| watch.changed(listed));
+        if let Some(Ok(children)) = self.scan.as_ref().map(Receiver::try_recv) {
+            self.scan = None;
+            self.children = children;
+            let ignored: Vec<PathBuf> = self.expanded.iter().cloned().collect();
+            ignored.iter().for_each(|dir| self.fill_ignored(dir));
+            let rows = self.rows();
+            let kept = self
+                .selected
+                .as_ref()
+                .is_some_and(|path| rows.iter().any(|r| r.node.path == *path));
+            if !kept {
+                self.selected = rows.first().map(|row| row.node.path.clone());
+            }
+        }
+        if self.stale && !self.is_scanning() {
+            self.stale = false;
+            self.rescan();
         }
     }
 

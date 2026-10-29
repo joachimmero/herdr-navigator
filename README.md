@@ -7,7 +7,8 @@ the chat.
   so you or a coding agent can point at a place you can read without leaving the terminal.
 - The pane follows the file. When it changes on disk, the pane rereads it and keeps your place.
   While the file is gone it keeps the last content and says the file is missing.
-- The project's files sit in a tree beside the file, which shows each file as you move onto it.
+- The project's files sit in a tree beside the file, which shows each file as you move onto it
+  and keeps up as files come and go.
 - Headings, emphasis, lists and task lists, quotes, code blocks, rules, links (with their target
   shown), footnotes, and tables, which shrink their columns and wrap cells to fit the pane.
 - Any other file shows as its source, syntax-highlighted in the terminal's own colors, with line

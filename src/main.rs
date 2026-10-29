@@ -14,6 +14,7 @@ mod location;
 mod markdown;
 mod tree;
 mod ui;
+mod watch;
 
 use std::process::ExitCode;
 
