@@ -53,6 +53,8 @@ pub struct Doc {
     anchor: Option<usize>,
     /// A source line to put the cursor on at the next layout.
     goto: Option<usize>,
+    /// Lines pointed at from outside, marked until the cursor leaves them.
+    pointed: Option<Lines>,
 }
 
 impl Doc {
@@ -70,6 +72,7 @@ impl Doc {
             cursor: 0,
             anchor: None,
             goto: None,
+            pointed: None,
         };
         doc.refresh();
         doc
@@ -145,8 +148,16 @@ impl Doc {
         self.build(width, comments);
         if let Some(line) = self.goto.take() {
             self.cursor = row_for(&self.rows, &self.shown, line);
+            // Bring as much of the pointed lines on screen as fits under the cursor.
+            let last = self.pointed.map(|lines| row_for(&self.rows, &self.shown, lines.last));
+            let bottom =
+                last.map_or(self.cursor, |last| last.min(self.cursor + height.saturating_sub(1)));
+            self.scroll = self.scroll.max((bottom + 1).saturating_sub(height));
         }
         self.move_cursor(0, height);
+        if !self.is_pointed(self.cursor) {
+            self.pointed = None;
+        }
         if room > 0 {
             let room = room.min(height.saturating_sub(1));
             self.scroll = self.scroll.max((self.selection_end() + 1 + room).saturating_sub(height));
@@ -196,6 +207,17 @@ impl Doc {
     pub fn go_to_line(&mut self, line: usize) {
         self.anchor = None;
         self.goto = Some(line);
+    }
+
+    /// Put the cursor on `lines` and mark them, until the cursor moves off them.
+    pub fn point(&mut self, lines: Lines) {
+        self.go_to_line(lines.first);
+        self.pointed = Some(lines);
+    }
+
+    /// Whether row `index` shows part of the lines pointed at.
+    pub fn is_pointed(&self, index: usize) -> bool {
+        self.pointed.zip(self.source(index)).is_some_and(|(pointed, row)| pointed.overlaps(row))
     }
 
     /// The source line the cursor is on, or the nearest above it on a row with none.
@@ -418,6 +440,26 @@ mod tests {
         assert_eq!((doc.cursor(), doc.scroll), (4, 3));
         doc.move_cursor(-4, 2);
         assert_eq!((doc.cursor(), doc.scroll), (0, 0));
+    }
+
+    #[test]
+    fn pointed_lines_come_on_screen_marked_until_the_cursor_leaves_them() {
+        let path = temp("point").with_file_name("point.rs");
+        fs::write(&path, "1\n2\n3\n4\n5\n6\n7\n8\n").unwrap();
+        let mut doc = Doc::open(path);
+        doc.point(Lines { first: 4, last: 6 });
+        doc.page(20, 3, &Comments::default(), 0);
+        assert_eq!((doc.cursor(), doc.scroll), (3, 3));
+        assert_eq!(
+            (2..7).map(|index| doc.is_pointed(index)).collect::<Vec<_>>(),
+            [false, true, true, true, false]
+        );
+        doc.move_cursor(2, 3);
+        doc.page(20, 3, &Comments::default(), 0);
+        assert!(doc.is_pointed(4));
+        doc.move_cursor(1, 3);
+        doc.page(20, 3, &Comments::default(), 0);
+        assert!(!doc.is_pointed(4));
     }
 
     #[test]

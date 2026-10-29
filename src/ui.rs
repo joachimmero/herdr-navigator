@@ -86,6 +86,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let count = comment::counted(app.comments.len());
         status.insert(0, Span::styled(format!("{count} "), Style::new().fg(Color::Yellow)));
     }
+    if let Some(pending) = &app.pending {
+        let label = format!("→ {} ⏎ ", pending.label(&app.tree.root));
+        status.insert(0, Span::styled(label, Style::new().fg(Color::Magenta)));
+    }
     if let Some(notice) = &app.notice {
         status.insert(0, Span::styled(format!("{notice} "), Style::new().fg(Color::Cyan)));
     }
@@ -169,11 +173,13 @@ fn draw_doc(
     }
 
     let mark = if focused { Style::new().fg(Color::Cyan) } else { dim() };
+    let pointed = Style::new().fg(Color::Magenta);
     let marks: Vec<Line> = (doc.scroll..doc.scroll + shown)
-        .map(|index| match (index == doc.cursor(), doc.is_selected(index)) {
-            (true, _) => Line::styled("▌", mark.add_modifier(Modifier::BOLD)),
-            (false, true) => Line::styled("▎", mark),
-            (false, false) => Line::raw(""),
+        .map(|index| match (index == doc.cursor(), doc.is_selected(index), doc.is_pointed(index)) {
+            (true, _, _) => Line::styled("▌", mark.add_modifier(Modifier::BOLD)),
+            (false, true, _) => Line::styled("▎", mark),
+            (false, false, true) => Line::styled("▎", pointed),
+            (false, false, false) => Line::raw(""),
         })
         .collect();
     let margin = Rect { x: area.x.saturating_sub(MARGIN), width: 1, ..area };

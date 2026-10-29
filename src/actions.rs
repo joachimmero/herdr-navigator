@@ -4,6 +4,8 @@
 use std::fs::File;
 use std::path::Path;
 
+use crate::location::Location;
+
 use serde_json::Value;
 
 use crate::herdr::{self, var};
@@ -70,14 +72,21 @@ pub enum Pane {
     Existing(String),
 }
 
-/// The herdr-navigator pane in workspace `ws`, opened beside pane `beside` in `cwd` showing `file`
-/// when there is none, without taking the focus.
-pub fn find_or_open(ws: &str, beside: &str, cwd: &Path, file: &Path) -> Result<Pane, String> {
+/// The herdr-navigator pane in workspace `ws`, opened beside pane `beside` in `cwd` showing
+/// `location` when there is none, without taking the focus.
+pub fn find_or_open(
+    ws: &str,
+    beside: &str,
+    cwd: &Path,
+    location: &Location,
+) -> Result<Pane, String> {
     let _lock = lock(ws)?;
     let (_, open) = panes(ws)?;
     match open.into_iter().next() {
         Some(pane) => Ok(Pane::Existing(pane)),
-        None => open_beside(beside, &cwd.to_string_lossy(), false, Some(file)).map(Pane::Opened),
+        None => {
+            open_beside(beside, &cwd.to_string_lossy(), false, Some(location)).map(Pane::Opened)
+        }
     }
 }
 
@@ -114,16 +123,16 @@ fn placement(ws: &str, context: &Value, panes: &[Value]) -> Result<(String, Stri
     Ok((target, cwd))
 }
 
-/// Open a herdr-navigator pane in `cwd` as a split to the right of pane `target`, showing `file` if
-/// given, and return its id.
+/// Open a herdr-navigator pane in `cwd` as a split to the right of pane `target`, showing
+/// `location` if given, and return its id.
 fn open_beside(
     target: &str,
     cwd: &str,
     focus: bool,
-    file: Option<&Path>,
+    location: Option<&Location>,
 ) -> Result<String, String> {
     let plugin = herdr::plugin_id();
-    let env = file.map(|file| format!("{FILE_VAR}={}", file.display()));
+    let env = location.map(|location| format!("{FILE_VAR}={}", location.encode()));
     let mut args = vec![
         "plugin",
         "pane",
@@ -169,7 +178,7 @@ fn shows_md(pane: &str) -> bool {
 
 const BINARY: &str = env!("CARGO_PKG_NAME");
 
-/// Names the file a newly opened pane shows first.
+/// Names the location a newly opened pane shows first, as `Location::encode` writes it.
 pub const FILE_VAR: &str = "HERDR_NAVIGATOR_FILE";
 
 fn lock(ws: &str) -> Result<File, String> {

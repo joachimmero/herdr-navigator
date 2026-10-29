@@ -19,6 +19,7 @@ use crate::composer::{Composer, Target};
 use crate::doc::Doc;
 use crate::herdr::{self, Agent};
 use crate::inbox::Inbox;
+use crate::location::Location;
 use crate::tree::Tree;
 use crate::ui::{self, Panes};
 
@@ -51,6 +52,8 @@ pub struct App {
     pub mode: Mode,
     /// What the last key did, when that needs saying; the next key clears it.
     pub notice: Option<String>,
+    /// A place pointed at while a comment was being written, which `⏎` goes to once it's done.
+    pub pending: Option<Location>,
     /// The pane the comments last went to, which the picker opens on.
     last_sent: Option<String>,
     /// Where `herdr-navigator <file>` posts files for this pane; `None` outside herdr.
@@ -61,9 +64,9 @@ pub struct App {
 const TICK: Duration = Duration::from_millis(100);
 const WHEEL_LINES: isize = 3;
 
-/// Run the pane, showing `file` first when given and the tree otherwise, and return the
+/// Run the pane, showing `location` first when given and the tree otherwise, and return the
 /// process exit code.
-pub fn run(file: Option<PathBuf>) -> u8 {
+pub fn run(location: Option<Location>) -> u8 {
     let cwd = std::env::current_dir().unwrap_or_default();
     let inbox = herdr::var("HERDR_PANE_ID").and_then(|pane| Inbox::for_pane(&pane).ok());
     // Left by an earlier pane with the same id.
@@ -72,7 +75,7 @@ pub fn run(file: Option<PathBuf>) -> u8 {
     }
     let mut terminal = ratatui::init();
     let _ = execute!(io::stdout(), EnableMouseCapture);
-    let outcome = App::new(Tree::new(&cwd), inbox, file).run(&mut terminal);
+    let outcome = App::new(Tree::new(&cwd), inbox, location).run(&mut terminal);
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     match outcome {
@@ -100,7 +103,7 @@ fn half_page_direction(key: &KeyEvent) -> Option<isize> {
 }
 
 impl App {
-    fn new(mut tree: Tree, inbox: Option<Inbox>, file: Option<PathBuf>) -> Self {
+    fn new(mut tree: Tree, inbox: Option<Inbox>, location: Option<Location>) -> Self {
         tree.rescan();
         let mut app = Self {
             tree,
@@ -109,20 +112,24 @@ impl App {
             comments: Comments::default(),
             mode: Mode::Browse,
             notice: None,
+            pending: None,
             last_sent: None,
             inbox,
             quit: false,
         };
-        if let Some(file) = file {
-            app.show(file);
+        if let Some(location) = location {
+            app.go(location);
         }
         app
     }
 
     fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.quit {
-            if let Some(file) = self.inbox.as_ref().and_then(Inbox::take) {
-                self.show(file);
+            if let Some(location) = self.inbox.as_ref().and_then(Inbox::take) {
+                match self.mode {
+                    Mode::Composing(_) => self.pending = Some(location),
+                    _ => self.go(location),
+                }
             }
             self.tree.poll();
             if let Some(doc) = &mut self.doc
@@ -138,6 +145,15 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Show `location`'s file, with its lines marked when it names some.
+    fn go(&mut self, location: Location) {
+        self.mode = Mode::Browse;
+        self.show(location.file);
+        if let (Some(doc), Some(lines)) = (&mut self.doc, location.lines) {
+            doc.point(lines);
+        }
     }
 
     /// Show `file`, keeping the place in it when it is already showing, and select it in the tree.
@@ -234,6 +250,10 @@ impl App {
             Mode::Browse => {}
         }
         match key.code {
+            KeyCode::Enter if self.pending.is_some() => {
+                let pending = self.pending.take().expect("checked just above");
+                self.go(pending);
+            }
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('n') => self.next_comment(true),
             KeyCode::Char('N') => self.next_comment(false),

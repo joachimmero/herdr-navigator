@@ -3,8 +3,8 @@
 A [herdr](https://herdr.dev) plugin that opens a pane for browsing and reading a project beside
 the chat.
 
-- `herdr-navigator PLAN.md` shows a file in the workspace's pane, so you or a coding agent can put a
-  doc where you can read it without leaving the terminal.
+- `herdr-navigator src/app.rs:40-52` shows a file in the workspace's pane with those lines marked,
+  so you or a coding agent can point at a place you can read without leaving the terminal.
 - The pane follows the file. When it changes on disk, the pane rereads it and keeps your place.
   While the file is gone it keeps the last content and says the file is missing.
 - The project's files sit in a tree beside the file, which shows each file as you move onto it.
@@ -39,15 +39,19 @@ description = "toggle navigator"
 
 The pane opens as a split beside the focused pane, in that pane's directory.
 
-## Showing a file from the command line
+## Pointing at a file from the command line
 
 ```sh
-herdr-navigator <file>
+herdr-navigator <file>[:line[-line]]
 ```
 
 - Run it from a herdr pane. A relative path is taken from the current directory.
 - It shows the file in the workspace's herdr-navigator pane, or opens one beside the calling pane
   without taking the focus, then returns at once.
+- With lines, the cursor goes to the first of them and they're marked in the margin until the
+  cursor moves off them.
+- While you're writing a comment the pane stays put, and the title bar shows where it was pointed;
+  `⏎` goes there once the comment is saved or cancelled.
 - Exit codes: `0` shown, `1` the file doesn't exist, the command ran outside herdr, or herdr
   failed, `2` bad arguments.
 

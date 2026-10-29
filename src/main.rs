@@ -9,17 +9,19 @@ mod herdr;
 mod highlight;
 mod inbox;
 mod layout;
+mod location;
 mod markdown;
 mod tree;
 mod ui;
 
-use std::path::PathBuf;
 use std::process::ExitCode;
+
+use location::Location;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     ExitCode::from(match args.as_slice() {
-        [] => app::run(herdr::var(actions::FILE_VAR).map(PathBuf::from)),
+        [] => app::run(herdr::var(actions::FILE_VAR).map(|text| Location::decode(&text))),
         [flag, name] if flag == "--action" => actions::run(name),
         [file] if !file.starts_with('-') => client::run(file),
         _ => {
