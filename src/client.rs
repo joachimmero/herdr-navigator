@@ -1,5 +1,5 @@
-//! `herdr-md <file>`: show a file in the workspace's herdr-md pane, opening one beside the
-//! calling pane if there is none, without taking the focus.
+//! `herdr-navigator <file>`: show a file in the workspace's herdr-navigator pane, opening one beside
+//! the calling pane if there is none, without taking the focus.
 
 use std::path::PathBuf;
 
@@ -7,17 +7,17 @@ use crate::actions::{self, Pane};
 use crate::herdr::var;
 use crate::inbox::Inbox;
 
-pub const USAGE: &str = "herdr-md <file>";
+pub const USAGE: &str = "herdr-navigator <file>";
 
 /// Show `file` and return the process exit code.
 pub fn run(file: &str) -> u8 {
     match show(file) {
         Ok(line) => {
-            println!("herdr-md: {line}");
+            println!("herdr-navigator: {line}");
             0
         }
         Err(why) => {
-            eprintln!("herdr-md: {why}");
+            eprintln!("herdr-navigator: {why}");
             1
         }
     }

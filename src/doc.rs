@@ -102,7 +102,8 @@ mod tests {
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("herdr-md-doc-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("herdr-navigator-doc-{}-{name}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir.join("doc.md")
     }

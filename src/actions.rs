@@ -1,5 +1,5 @@
-//! The plugin's toggle, open, and close actions on the invoking workspace's herdr-md pane, and
-//! the find-or-open showing a file needs.
+//! The plugin's toggle, open, and close actions on the invoking workspace's herdr-navigator pane,
+//! and the find-or-open showing a file needs.
 
 use std::fs::File;
 use std::path::Path;
@@ -22,17 +22,17 @@ pub fn run(name: &str) -> u8 {
         "open" => Action::Open,
         "close" => Action::Close,
         _ => {
-            eprintln!("herdr-md: unknown action '{name}' (toggle | open | close)");
+            eprintln!("herdr-navigator: unknown action '{name}' (toggle | open | close)");
             return 1;
         }
     };
     match act(action) {
         Ok(line) => {
-            println!("herdr-md: {line}");
+            println!("herdr-navigator: {line}");
             0
         }
         Err(why) => {
-            eprintln!("herdr-md: {why}");
+            eprintln!("herdr-navigator: {why}");
             1
         }
     }
@@ -70,7 +70,7 @@ pub enum Pane {
     Existing(String),
 }
 
-/// The herdr-md pane in workspace `ws`, opened beside pane `beside` in `cwd` showing `file`
+/// The herdr-navigator pane in workspace `ws`, opened beside pane `beside` in `cwd` showing `file`
 /// when there is none, without taking the focus.
 pub fn find_or_open(ws: &str, beside: &str, cwd: &Path, file: &Path) -> Result<Pane, String> {
     let _lock = lock(ws)?;
@@ -81,7 +81,7 @@ pub fn find_or_open(ws: &str, beside: &str, cwd: &Path, file: &Path) -> Result<P
     }
 }
 
-/// Workspace `ws`'s panes, and the ids of those showing herdr-md.
+/// Workspace `ws`'s panes, and the ids of those showing herdr-navigator.
 fn panes(ws: &str) -> Result<(Vec<Value>, Vec<String>), String> {
     let panes = herdr::call(&["pane", "list", "--workspace", ws])?;
     let panes = panes["panes"].as_array().cloned().unwrap_or_default();
@@ -114,7 +114,7 @@ fn placement(ws: &str, context: &Value, panes: &[Value]) -> Result<(String, Stri
     Ok((target, cwd))
 }
 
-/// Open a herdr-md pane in `cwd` as a split to the right of pane `target`, showing `file` if
+/// Open a herdr-navigator pane in `cwd` as a split to the right of pane `target`, showing `file` if
 /// given, and return its id.
 fn open_beside(
     target: &str,
@@ -150,8 +150,8 @@ fn open_beside(
         .ok_or_else(|| format!("herdr opened a pane in {cwd} without naming it"))
 }
 
-/// Whether pane `pane`'s foreground is the herdr-md pane itself, which runs with no arguments,
-/// rather than an action or a hand-off.
+/// Whether pane `pane`'s foreground is the herdr-navigator pane itself, which runs with no
+/// arguments, rather than an action or a hand-off.
 fn shows_md(pane: &str) -> bool {
     let Ok(info) = herdr::call(&["pane", "process-info", "--pane", pane]) else {
         return false;
@@ -170,7 +170,7 @@ fn shows_md(pane: &str) -> bool {
 const BINARY: &str = env!("CARGO_PKG_NAME");
 
 /// Names the file a newly opened pane shows first.
-pub const FILE_VAR: &str = "HERDR_MD_FILE";
+pub const FILE_VAR: &str = "HERDR_NAVIGATOR_FILE";
 
 fn lock(ws: &str) -> Result<File, String> {
     let dir = herdr::state_dir()?;

@@ -1,5 +1,5 @@
-id = "joachimmero.herdr-md"
-name = "herdr-md"
+id = "joachimmero.herdr-navigator"
+name = "herdr-navigator"
 version = "0.1.0"
 # 0.9.0 resolves pane commands against the plugin root.
 min_herdr_version = "0.9.3"
@@ -8,24 +8,24 @@ description = "Read markdown files in a pane beside the chat."
 
 [[panes]]
 id = "pane"
-title = "herdr-md"
+title = "herdr-navigator"
 placement = "split"
-command = ["bin/herdr-md"]
+command = ["bin/herdr-navigator"]
 
 [[actions]]
 id = "toggle"
-title = "herdr-md: toggle pane"
+title = "herdr-navigator: toggle pane"
 contexts = ["pane", "workspace"]
-command = ["bin/herdr-md", "--action", "toggle"]
+command = ["bin/herdr-navigator", "--action", "toggle"]
 
 [[actions]]
 id = "open"
-title = "herdr-md: open pane"
+title = "herdr-navigator: open pane"
 contexts = ["pane", "workspace"]
-command = ["bin/herdr-md", "--action", "open"]
+command = ["bin/herdr-navigator", "--action", "open"]
 
 [[actions]]
 id = "close"
-title = "herdr-md: close pane"
+title = "herdr-navigator: close pane"
 contexts = ["pane", "workspace"]
-command = ["bin/herdr-md", "--action", "close"]
+command = ["bin/herdr-navigator", "--action", "close"]

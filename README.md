@@ -1,9 +1,9 @@
-# herdr-md
+# herdr-navigator
 
 A [herdr](https://herdr.dev) plugin that opens a pane for reading markdown files beside the chat.
 
-- `herdr-md PLAN.md` shows a file in the workspace's pane, so you or a coding agent can put a doc
-  where you can read it without leaving the terminal.
+- `herdr-navigator PLAN.md` shows a file in the workspace's pane, so you or a coding agent can put a
+  doc where you can read it without leaving the terminal.
 - The pane follows the file. When it changes on disk, the pane rereads it and keeps your place.
   While the file is gone it keeps the last content and says the file is missing.
 - With no file to show, the pane lists the project's markdown files to pick from.
@@ -22,15 +22,15 @@ A [herdr](https://herdr.dev) plugin that opens a pane for reading markdown files
 scripts/link.sh
 ```
 
-That builds the release binary with `cargo`, links `bin/herdr-md` to it, puts `herdr-md` on `PATH`
-through `~/.local/bin`, and runs `herdr plugin link`. Then bind the toggle to a key in herdr's
-`config.toml`:
+That builds the release binary with `cargo`, links `bin/herdr-navigator` to it, puts
+`herdr-navigator` on `PATH` through `~/.local/bin`, and runs `herdr plugin link`. Then bind the
+toggle to a key in herdr's `config.toml`:
 
 ```toml
 [[keys.command]]
 key = "prefix+m"
 type = "plugin_action"
-command = "joachimmero.herdr-md.toggle"
+command = "joachimmero.herdr-navigator.toggle"
 description = "toggle markdown reader"
 ```
 
@@ -39,11 +39,11 @@ The pane opens as a split beside the focused pane, in that pane's directory.
 ## Showing a file from the command line
 
 ```sh
-herdr-md <file>
+herdr-navigator <file>
 ```
 
 - Run it from a herdr pane. A relative path is taken from the current directory.
-- It shows the file in the workspace's herdr-md pane, or opens one beside the calling pane
+- It shows the file in the workspace's herdr-navigator pane, or opens one beside the calling pane
   without taking the focus, then returns at once.
 - Exit codes: `0` shown, `1` the file doesn't exist, the command ran outside herdr, or herdr
   failed, `2` bad arguments.

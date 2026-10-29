@@ -25,7 +25,7 @@ pub enum Screen {
 pub struct App {
     pub screen: Screen,
     pub picker: Picker,
-    /// Where `herdr-md <file>` posts files for this pane; `None` outside herdr.
+    /// Where `herdr-navigator <file>` posts files for this pane; `None` outside herdr.
     inbox: Option<Inbox>,
     quit: bool,
 }
@@ -50,7 +50,7 @@ pub fn run(file: Option<PathBuf>) -> u8 {
     match outcome {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("herdr-md: {error}");
+            eprintln!("herdr-navigator: {error}");
             1
         }
     }

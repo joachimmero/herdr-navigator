@@ -33,7 +33,7 @@ pub fn var(name: &str) -> Option<String> {
 }
 
 pub fn plugin_id() -> String {
-    var("HERDR_PLUGIN_ID").unwrap_or_else(|| "joachimmero.herdr-md".into())
+    var("HERDR_PLUGIN_ID").unwrap_or_else(|| "joachimmero.herdr-navigator".into())
 }
 
 /// The plugin's state dir. herdr hands it to the pane and to actions but not to a shell running

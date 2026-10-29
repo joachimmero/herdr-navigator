@@ -1,5 +1,5 @@
-//! How `herdr-md <file>` hands a file to a pane that is already open: a file per pane naming the
-//! file to show, which the pane takes and removes.
+//! How `herdr-navigator <file>` hands a file to a pane that is already open: a file per pane
+//! naming the file to show, which the pane takes and removes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,7 +46,8 @@ mod tests {
 
     #[test]
     fn a_posted_file_is_taken_once_and_the_latest_post_wins() {
-        let dir = std::env::temp_dir().join(format!("herdr-md-inbox-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("herdr-navigator-inbox-{}", std::process::id()));
         let inbox = Inbox::at(dir.join("w1_p1"));
         assert_eq!(inbox.take(), None);
         inbox.post(Path::new("/a.md")).unwrap();

@@ -19,7 +19,7 @@ fn main() -> ExitCode {
         [file] if !file.starts_with('-') => client::run(file),
         _ => {
             eprintln!("usage: {}", client::USAGE);
-            eprintln!("       herdr-md [--action toggle|open|close]");
+            eprintln!("       herdr-navigator [--action toggle|open|close]");
             2
         }
     })

@@ -125,8 +125,8 @@ mod tests {
     use super::*;
 
     fn tree(name: &str, files: &[&str]) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("herdr-md-picker-{}-{name}", std::process::id()));
+        let root = std::env::temp_dir()
+            .join(format!("herdr-navigator-picker-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         for file in files {
             let path = root.join(file);
