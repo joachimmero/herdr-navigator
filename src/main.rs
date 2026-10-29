@@ -2,6 +2,8 @@ mod actions;
 mod app;
 mod client;
 mod code;
+mod comment;
+mod composer;
 mod doc;
 mod herdr;
 mod highlight;

@@ -12,6 +12,8 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 
+use crate::comment::{Comment, Comments};
+use crate::composer::{Composer, Target};
 use crate::doc::Doc;
 use crate::herdr;
 use crate::inbox::Inbox;
@@ -24,10 +26,22 @@ pub enum Focus {
     File,
 }
 
+/// What the keys drive besides the tree and the file.
+pub enum Mode {
+    Browse,
+    Composing(Composer),
+    /// The list of every comment, and the selected one's place in it.
+    List {
+        selected: usize,
+    },
+}
+
 pub struct App {
     pub tree: Tree,
     pub doc: Option<Doc>,
     pub focus: Focus,
+    pub comments: Comments,
+    pub mode: Mode,
     /// Where `herdr-navigator <file>` posts files for this pane; `None` outside herdr.
     inbox: Option<Inbox>,
     quit: bool,
@@ -77,7 +91,15 @@ fn half_page_direction(key: &KeyEvent) -> Option<isize> {
 impl App {
     fn new(mut tree: Tree, inbox: Option<Inbox>, file: Option<PathBuf>) -> Self {
         tree.rescan();
-        let mut app = Self { tree, doc: None, focus: Focus::Tree, inbox, quit: false };
+        let mut app = Self {
+            tree,
+            doc: None,
+            focus: Focus::Tree,
+            comments: Comments::default(),
+            mode: Mode::Browse,
+            inbox,
+            quit: false,
+        };
         if let Some(file) = file {
             app.show(file);
         }
@@ -90,8 +112,10 @@ impl App {
                 self.show(file);
             }
             self.tree.poll();
-            if let Some(doc) = &mut self.doc {
-                doc.refresh();
+            if let Some(doc) = &mut self.doc
+                && doc.refresh()
+            {
+                self.comments.reanchor(&doc.path, doc.text());
             }
             terminal.draw(|frame| ui::draw(frame, &mut self))?;
             if event::poll(TICK)? {
@@ -112,7 +136,9 @@ impl App {
 
     fn open(&mut self, file: PathBuf) {
         if !self.doc.as_ref().is_some_and(|doc| doc.path == file) {
-            self.doc = Some(Doc::open(file));
+            let doc = Doc::open(file);
+            self.comments.reanchor(&doc.path, doc.text());
+            self.doc = Some(doc);
         }
     }
 
@@ -133,6 +159,9 @@ impl App {
     }
 
     fn on_mouse(&mut self, mouse: MouseEvent, panes: &Panes) {
+        if !matches!(self.mode, Mode::Browse) {
+            return;
+        }
         let at = Position::new(mouse.column, mouse.row);
         let in_tree = panes.tree.is_some_and(|tree| tree.contains(at));
         let in_file = panes.file.is_some_and(|file| file.contains(at));
@@ -172,17 +201,146 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent, panes: &Panes) {
-        if is_quit(&key) || key.code == KeyCode::Char('q') {
+        if is_quit(&key) {
             self.quit = true;
             return;
         }
-        match (self.focus, &mut self.doc) {
-            (Focus::File, Some(doc)) => match key.code {
-                KeyCode::Esc if doc.clear_selection() => {}
-                KeyCode::Tab | KeyCode::Esc => self.focus = Focus::Tree,
-                _ => on_doc_key(doc, key, panes.page()),
+        match &mut self.mode {
+            Mode::Composing(composer) => {
+                if on_composer_key(composer, key) {
+                    self.finish_composing(key.code == KeyCode::Enter);
+                }
+                return;
+            }
+            Mode::List { selected } => {
+                let selected = *selected;
+                return self.on_list_key(key, selected);
+            }
+            Mode::Browse => {}
+        }
+        match key.code {
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('n') => self.next_comment(true),
+            KeyCode::Char('N') => self.next_comment(false),
+            _ => match (self.focus, &mut self.doc) {
+                (Focus::File, Some(doc)) => match key.code {
+                    KeyCode::Esc if doc.clear_selection() => {}
+                    KeyCode::Tab | KeyCode::Esc => self.focus = Focus::Tree,
+                    KeyCode::Char('c') => self.compose(),
+                    KeyCode::Char('e') => self.edit(),
+                    KeyCode::Char('d') => {
+                        if let Some(id) = doc.comment_at_cursor(&self.comments) {
+                            self.comments.remove(id);
+                        }
+                    }
+                    KeyCode::Char('l') => self.mode = Mode::List { selected: 0 },
+                    _ => on_doc_key(doc, key, panes.page()),
+                },
+                _ => self.on_tree_key(key, panes.page()),
             },
-            _ => self.on_tree_key(key, panes.page()),
+        }
+    }
+
+    /// Start a comment on the selected lines.
+    fn compose(&mut self) {
+        let Some(doc) = &self.doc else { return };
+        let Some(lines) = doc.selection() else { return };
+        let snippet: Vec<&str> =
+            doc.text().lines().skip(lines.first - 1).take(lines.last - lines.first + 1).collect();
+        let comment = Comment {
+            file: doc.path.clone(),
+            lines,
+            snippet: snippet.join("\n"),
+            text: String::new(),
+            outdated: false,
+        };
+        self.mode = Mode::Composing(Composer::new(Target::New(comment), String::new()));
+    }
+
+    /// Edit the comment at the cursor.
+    fn edit(&mut self) {
+        let Some(id) = self.doc.as_ref().and_then(|doc| doc.comment_at_cursor(&self.comments))
+        else {
+            return;
+        };
+        let text = self.comments.get(id).map(|comment| comment.text.clone()).unwrap_or_default();
+        self.mode = Mode::Composing(Composer::new(Target::Edit(id), text));
+    }
+
+    /// Close the comment box, writing what it holds when `save` and it holds anything.
+    fn finish_composing(&mut self, save: bool) {
+        let Mode::Composing(composer) = std::mem::replace(&mut self.mode, Mode::Browse) else {
+            return;
+        };
+        let text = composer.text.trim_end().to_owned();
+        if !save || text.trim().is_empty() {
+            return;
+        }
+        match composer.target {
+            Target::New(comment) => {
+                self.comments.add(Comment { text, ..comment });
+                if let Some(doc) = &mut self.doc {
+                    doc.clear_selection();
+                }
+            }
+            Target::Edit(id) => self.comments.set_text(id, text),
+        }
+    }
+
+    /// Go to the next comment after the cursor in file and line order, or the one before it,
+    /// wrapping around.
+    fn next_comment(&mut self, forward: bool) {
+        let here = self.doc.as_ref().map(|doc| (doc.path.clone(), doc.cursor_line().unwrap_or(0)));
+        let sorted = self.comments.sorted();
+        let places: Vec<(PathBuf, usize)> =
+            sorted.iter().map(|(_, comment)| (comment.file.clone(), comment.lines.first)).collect();
+        let target = match (forward, &here) {
+            (true, Some(here)) => places.iter().find(|place| *place > here),
+            (false, Some(here)) => places.iter().rev().find(|place| *place < here),
+            (_, None) => None,
+        };
+        let wrapped = if forward { places.first() } else { places.last() };
+        if let Some((file, line)) = target.or(wrapped).cloned() {
+            self.jump(file, line);
+        }
+    }
+
+    /// Show `file` with the cursor on `line`.
+    fn jump(&mut self, file: PathBuf, line: usize) {
+        self.show(file);
+        if let Some(doc) = &mut self.doc {
+            doc.go_to_line(line);
+        }
+    }
+
+    fn on_list_key(&mut self, key: KeyEvent, selected: usize) {
+        let sorted = self.comments.sorted();
+        let last = sorted.len().saturating_sub(1);
+        let chosen = sorted
+            .get(selected)
+            .map(|(id, comment)| (*id, comment.file.clone(), comment.lines.first));
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.mode = Mode::List { selected: (selected + 1).min(last) };
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.mode = Mode::List { selected: selected.saturating_sub(1) };
+            }
+            KeyCode::Char('d') => {
+                if let Some((id, _, _)) = chosen {
+                    self.comments.remove(id);
+                    self.mode = Mode::List { selected: selected.min(last.saturating_sub(1)) };
+                }
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Browse;
+                if let Some((_, file, line)) = chosen {
+                    self.jump(file, line);
+                }
+            }
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Esc | KeyCode::Char('l') => self.mode = Mode::Browse,
+            _ => {}
         }
     }
 
@@ -211,6 +369,26 @@ impl App {
         }
         self.follow_tree();
     }
+}
+
+/// Edit the comment box, saying whether the key closes it: `Enter` to save, `Esc` to cancel.
+fn on_composer_key(composer: &mut Composer, key: KeyEvent) -> bool {
+    let newline = key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Enter if newline => composer.insert('\n'),
+        KeyCode::Char('j') if control => composer.insert('\n'),
+        KeyCode::Enter | KeyCode::Esc => return true,
+        KeyCode::Backspace => composer.backspace(),
+        KeyCode::Delete => composer.delete(),
+        KeyCode::Left => composer.left(),
+        KeyCode::Right => composer.right(),
+        KeyCode::Home => composer.home(),
+        KeyCode::End => composer.end(),
+        KeyCode::Char(ch) if !control => composer.insert(ch),
+        _ => {}
+    }
+    false
 }
 
 fn on_doc_key(doc: &mut Doc, key: KeyEvent, page: usize) {

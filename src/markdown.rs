@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::layout::{Lines, Row};
+use crate::layout::{Lines, Row, chunk};
 
 const BULLETS: [&str; 3] = ["•", "◦", "▪"];
 const TAB: &str = "    ";
@@ -601,22 +601,6 @@ fn fit_columns(natural: &[usize], budget: usize) -> Vec<usize> {
         open = wide;
     }
     widths.into_iter().map(|width| width.max(1)).collect()
-}
-
-/// `text` cut into pieces at most `width` columns wide, keeping an empty line as one piece.
-fn chunk(text: &str, width: usize) -> Vec<String> {
-    let mut pieces = vec![String::new()];
-    let mut used = 0;
-    for ch in text.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if used + ch_width > width && used > 0 {
-            pieces.push(String::new());
-            used = 0;
-        }
-        pieces.last_mut().expect("pieces starts non-empty").push(ch);
-        used += ch_width;
-    }
-    pieces
 }
 
 /// A character to lay out, its style, and its source line.

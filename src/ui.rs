@@ -6,10 +6,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, Mode};
+use crate::comment::Comments;
+use crate::composer::{Composer, Target};
 use crate::doc::Doc;
+use crate::layout::Lines;
 use crate::tree::{Row, Tree};
 
 /// The columns left blank on either side of the document.
@@ -64,8 +67,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_tree(frame, &app.tree, area, app.focus == Focus::Tree);
     }
     let mut status = Vec::new();
-    if let (Some(area), Some(doc)) = (panes.file, &mut app.doc) {
-        status = draw_doc(frame, doc, area, app.focus == Focus::File);
+    match (&app.mode, panes.file.or(panes.tree)) {
+        (Mode::List { selected }, Some(area)) => draw_list(frame, app, *selected, area),
+        _ => {
+            if let (Some(area), Some(doc)) = (panes.file, &mut app.doc) {
+                let composer = match &app.mode {
+                    Mode::Composing(composer) => Some(composer),
+                    _ => None,
+                };
+                let focused = app.focus == Focus::File;
+                status = draw_doc(frame, doc, &app.comments, composer, area, focused);
+            }
+        }
+    }
+    if app.comments.len() > 0 {
+        let count = app.comments.len();
+        let noun = if count == 1 { "comment" } else { "comments" };
+        status.insert(0, Span::styled(format!("{count} {noun} "), Style::new().fg(Color::Yellow)));
     }
     if app.tree.is_scanning() {
         status.insert(0, Span::styled("scanning… ", dim()));
@@ -121,14 +139,27 @@ fn tree_row(tree: &Tree, row: &Row, selected: bool, focused: bool) -> Line<'stat
     }
 }
 
-/// Draw the file, its cursor and selection marked in the margin, and return its part of the
-/// title bar's status.
-fn draw_doc(frame: &mut Frame, doc: &mut Doc, area: Rect, focused: bool) -> Vec<Span<'static>> {
+/// Draw the file, its cursor and selection marked in the margin and the comment box under the
+/// selection while there is one, and return its part of the title bar's status.
+fn draw_doc(
+    frame: &mut Frame,
+    doc: &mut Doc,
+    comments: &Comments,
+    composer: Option<&Composer>,
+    area: Rect,
+    focused: bool,
+) -> Vec<Span<'static>> {
     let height = usize::from(area.height);
-    let lines: Vec<Line> =
-        doc.page(area.width, height).iter().map(|row| row.line.clone()).collect();
+    let box_height = composer.map_or(0, |composer| composer_height(composer, area));
+    let lines = doc.page(area.width, height, comments, usize::from(box_height));
     let shown = lines.len();
     frame.render_widget(Paragraph::new(lines), area);
+    if let Some(composer) = composer {
+        let below = u16::try_from(doc.selection_end() + 1 - doc.scroll).unwrap_or(u16::MAX);
+        let y = area.y.saturating_add(below).min(area.bottom().saturating_sub(box_height));
+        let rect = Rect { y, height: box_height.min(area.bottom() - y), ..area };
+        draw_composer(frame, composer, comments, rect);
+    }
 
     let mark = if focused { Style::new().fg(Color::Cyan) } else { dim() };
     let marks: Vec<Line> = (doc.scroll..doc.scroll + shown)
@@ -147,13 +178,8 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, area: Rect, focused: bool) -> Vec<
         status.push(Span::styled("file missing ", Style::new().fg(Color::Red)));
     }
     if let Some(lines) = doc.selection() {
-        let label = if lines.first == lines.last {
-            format!("L{} ", lines.first)
-        } else {
-            format!("L{}–{} ", lines.first, lines.last)
-        };
         let style = if doc.is_selecting() { Style::new().fg(Color::Cyan) } else { dim() };
-        status.push(Span::styled(label, style));
+        status.push(Span::styled(format!("{} ", lines_label(lines)), style));
     }
     if total > height {
         let percent = (doc.scroll + height).min(total) * 100 / total;
@@ -162,12 +188,88 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, area: Rect, focused: bool) -> Vec<
     status
 }
 
+/// The rows the comment box takes: its text's, between two borders, at most half the file.
+fn composer_height(composer: &Composer, area: Rect) -> u16 {
+    let rows = composer.rows(usize::from(area.width.saturating_sub(2))).0.len();
+    u16::try_from(rows + 2).unwrap_or(u16::MAX).min((area.height / 2).max(3))
+}
+
+fn draw_composer(frame: &mut Frame, composer: &Composer, comments: &Comments, area: Rect) {
+    let (verb, lines) = match &composer.target {
+        Target::New(comment) => ("comment", Some(comment.lines)),
+        Target::Edit(id) => ("edit", comments.get(*id).map(|comment| comment.lines)),
+    };
+    let title = match lines {
+        Some(lines) => format!(" {verb} · {} ", lines_label(lines)),
+        None => format!(" {verb} "),
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::Cyan))
+        .title(title)
+        .title_bottom(Line::styled(" ⏎ save · ⇧⏎ newline · esc cancel ", dim()).right_aligned());
+    let inner = block.inner(area);
+    let (rows, (row, column)) = composer.rows(usize::from(inner.width));
+    // A box too short for its text scrolls to keep the caret's row in it.
+    let scroll = row.saturating_sub(usize::from(inner.height).saturating_sub(1));
+    let text: Vec<Line> = if composer.text.is_empty() {
+        vec![Line::styled("Leave a comment…", dim())]
+    } else {
+        rows.into_iter().skip(scroll).map(Line::raw).collect()
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(text).block(block), area);
+    let x = inner.x + u16::try_from(column).unwrap_or(u16::MAX).min(inner.width.saturating_sub(1));
+    let y = inner.y + u16::try_from(row - scroll).unwrap_or(0);
+    frame.set_cursor_position((x, y));
+}
+
+/// Every comment, one line each: its place and the start of what it says.
+fn draw_list(frame: &mut Frame, app: &App, selected: usize, area: Rect) {
+    let sorted = app.comments.sorted();
+    if sorted.is_empty() {
+        let empty = Line::styled("No comments yet. Select lines and press c.", dim());
+        frame.render_widget(Paragraph::new(empty), area);
+        return;
+    }
+    let height = usize::from(area.height).max(1);
+    let offset = (selected + 1).saturating_sub(height);
+    let lines: Vec<Line> = sorted
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(index, (_, comment))| {
+            let mut location = Style::new().fg(Color::Yellow);
+            if comment.outdated {
+                location = location.add_modifier(Modifier::CROSSED_OUT);
+            }
+            let first = comment.text.lines().next().unwrap_or_default().to_owned();
+            let line = Line::from(vec![
+                Span::styled(comment.location(&app.tree.root), location),
+                Span::raw("  "),
+                Span::raw(first),
+            ]);
+            if index == selected {
+                line.style(Style::new().add_modifier(Modifier::REVERSED))
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 fn draw_title(frame: &mut Frame, area: Rect, left: Vec<Span>, right: Vec<Span>) {
     let bar = Style::new().add_modifier(Modifier::REVERSED);
     let left = Line::from([vec![Span::raw(" ")], left].concat());
     let right = Line::from([right, vec![Span::raw(" ")]].concat()).right_aligned();
     frame.render_widget(Paragraph::new(left).style(bar), area);
     frame.render_widget(Paragraph::new(right).style(bar), area);
+}
+
+fn lines_label(Lines { first, last }: Lines) -> String {
+    if first == last { format!("L{first}") } else { format!("L{first}–{last}") }
 }
 
 fn inset(area: Rect) -> Rect {

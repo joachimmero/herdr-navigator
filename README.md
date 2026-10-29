@@ -63,6 +63,10 @@ In a file:
 | `space` / `PgDn`, `PgUp` | Move a page down, up |
 | `g` `G` / `Home` `End` | Go to the top, the bottom |
 | `v` | Start selecting lines at the cursor, or stop |
+| `c` | Comment on the selection, or the cursor's line |
+| `e` `d` | Edit, delete the comment at the cursor |
+| `n` `N` | Go to the next, previous comment, in any file |
+| `l` | List every comment |
 | `Esc` | Drop the selection, or go to the tree |
 | `Tab` | Go to the tree |
 | `q` | Close the pane |
@@ -83,6 +87,17 @@ In the tree:
 
 The cursor and the selection are marked in the margin, and the title bar shows the source lines
 they cover, so in rendered markdown you can see which lines of the file a paragraph came from.
+
+## Comments
+
+A comment sits in a card under the lines it's on, and stays for the session. In the comment box,
+`⏎` saves, `Shift+⏎`, `Alt+⏎` or `Ctrl+j` starts a new line, and `Esc` cancels; saving an empty
+box cancels too. In the list, `j` `k` move, `⏎` jumps to the comment, `d` deletes it, and `Esc`
+or `l` closes the list.
+
+When the file changes, each comment follows the lines it quoted to wherever they now sit, the
+nearest place when they appear more than once. A comment whose lines are gone is marked outdated
+and stays where they last were.
 
 ## The tree
 

@@ -1,4 +1,4 @@
-//! The file the pane shows, kept in step with the disk.
+//! The file the pane shows, kept in step with the disk, with its comments' cards among its rows.
 
 use std::fs;
 use std::ops::RangeInclusive;
@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::comment::{self, Comments};
 use crate::layout::{Lines, Row};
 use crate::{code, highlight, markdown};
 
@@ -20,38 +21,55 @@ struct Stamp {
 
 /// What the file holds, as the pane shows it.
 enum Content {
-    Markdown(String),
+    Markdown,
     /// Each line styled by its grammar.
     Code(Vec<Vec<Span<'static>>>),
     Binary,
 }
 
+/// One row on screen: one of the file's rows, or a line of a comment's card under them.
+enum Shown {
+    Source(usize),
+    Card { comment: u64, line: Line<'static> },
+}
+
 pub struct Doc {
     pub path: PathBuf,
     content: Content,
-    /// `None` while the file is missing, in which case `source` is what it last held.
+    /// The file's text, empty for a binary file.
+    text: String,
+    /// `None` while the file is missing, in which case the content is what it last held.
     stamp: Option<Stamp>,
-    /// The width `rows` were laid out for.
+    /// The width `rows` were laid out for, 0 when they need laying out again.
     width: u16,
     rows: Vec<Row>,
+    /// The comments' revision `shown` was built for.
+    revision: Option<u64>,
+    shown: Vec<Shown>,
     pub scroll: usize,
-    /// The row the cursor is on.
+    /// The row on screen the cursor is on.
     cursor: usize,
-    /// The row a selection started on, while there is one.
+    /// The row on screen a selection started on, while there is one.
     anchor: Option<usize>,
+    /// A source line to put the cursor on at the next layout.
+    goto: Option<usize>,
 }
 
 impl Doc {
     pub fn open(path: PathBuf) -> Self {
         let mut doc = Self {
             path,
-            content: Content::Code(Vec::new()),
+            content: Content::Binary,
+            text: String::new(),
             stamp: None,
             width: 0,
             rows: Vec::new(),
+            revision: None,
+            shown: Vec::new(),
             scroll: 0,
             cursor: 0,
             anchor: None,
+            goto: None,
         };
         doc.refresh();
         doc
@@ -61,31 +79,38 @@ impl Doc {
         self.stamp.is_none()
     }
 
-    /// Reread the file if it changed on disk since it was last read.
-    pub fn refresh(&mut self) {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Reread the file if it changed on disk since it was last read, saying whether it did.
+    pub fn refresh(&mut self) -> bool {
         let stamp = fs::metadata(&self.path).ok().and_then(|metadata| {
             Some(Stamp { modified: metadata.modified().ok()?, len: metadata.len() })
         });
         if stamp == self.stamp {
-            return;
+            return false;
         }
         let source = stamp.and_then(|_| fs::read(&self.path).ok());
         self.stamp = source.as_ref().and(stamp);
-        if let Some(source) = source {
-            self.content = read(&self.path, &source);
-            self.width = 0;
-        }
+        let Some(source) = source else { return false };
+        (self.content, self.text) = read(&self.path, &source);
+        self.width = 0;
+        true
     }
 
-    /// The document laid out for `width` columns, the cursor and selection kept on the source
-    /// lines they were on.
-    pub fn rows(&mut self, width: u16) -> &[Row] {
+    /// Lay the file out for `width` columns with `comments`' cards under their lines, keeping
+    /// the cursor and selection on the source lines they were on.
+    pub fn build(&mut self, width: u16, comments: &Comments) {
+        if width == self.width && self.revision == Some(comments.revision()) {
+            return;
+        }
+        let cursor_line = self.source_line(self.cursor);
+        let anchor_line = self.anchor.and_then(|anchor| self.source_line(anchor));
+        let cursor_on_screen = self.cursor.saturating_sub(self.scroll);
         if width != self.width {
-            let cursor_line = self.source_line(self.cursor);
-            let anchor_line = self.anchor.and_then(|anchor| self.source_line(anchor));
-            let cursor_on_screen = self.cursor.saturating_sub(self.scroll);
             self.rows = match &self.content {
-                Content::Markdown(source) => markdown::render(source, width),
+                Content::Markdown => markdown::render(&self.text, width),
                 Content::Code(lines) => code::layout(lines, width),
                 Content::Binary => vec![Row {
                     line: Line::styled(
@@ -96,29 +121,43 @@ impl Doc {
                 }],
             };
             self.width = width;
-            if let Some(line) = cursor_line {
-                self.cursor = row_for(&self.rows, line);
-                self.scroll = self.cursor.saturating_sub(cursor_on_screen);
-            }
-            self.anchor = self
-                .anchor
-                .map(|anchor| anchor_line.map_or(anchor, |line| row_for(&self.rows, line)));
         }
-        &self.rows
+        self.shown = with_cards(&self.rows, &self.path, comments, width);
+        self.revision = Some(comments.revision());
+        if let Some(line) = cursor_line {
+            self.cursor = row_for(&self.rows, &self.shown, line);
+            self.scroll = self.cursor.saturating_sub(cursor_on_screen);
+        }
+        self.anchor = self.anchor.map(|anchor| {
+            anchor_line.map_or(anchor, |line| row_for(&self.rows, &self.shown, line))
+        });
     }
 
-    /// The rows on screen in a page `width` columns by `height` lines, scrolled to keep the
-    /// cursor on it.
-    pub fn page(&mut self, width: u16, height: usize) -> &[Row] {
-        self.rows(width);
+    /// The rows on screen in a page `width` columns by `height` rows, scrolled to keep the
+    /// cursor on it and `room` rows free under the selection.
+    pub fn page(
+        &mut self,
+        width: u16,
+        height: usize,
+        comments: &Comments,
+        room: usize,
+    ) -> Vec<Line<'static>> {
+        self.build(width, comments);
+        if let Some(line) = self.goto.take() {
+            self.cursor = row_for(&self.rows, &self.shown, line);
+        }
         self.move_cursor(0, height);
-        let end = (self.scroll + height).min(self.rows.len());
-        &self.rows[self.scroll..end]
+        if room > 0 {
+            let room = room.min(height.saturating_sub(1));
+            self.scroll = self.scroll.max((self.selection_end() + 1 + room).saturating_sub(height));
+        }
+        let end = (self.scroll + height).min(self.shown.len());
+        (self.scroll..end).map(|index| self.line(index).clone()).collect()
     }
 
     /// How many rows the document took at its last layout.
     pub fn len(&self) -> usize {
-        self.rows.len()
+        self.shown.len()
     }
 
     pub fn cursor(&self) -> usize {
@@ -152,6 +191,18 @@ impl Doc {
         self.move_cursor(0, height);
     }
 
+    /// Put the cursor on source line `line` when the page is next drawn, dropping any
+    /// selection.
+    pub fn go_to_line(&mut self, line: usize) {
+        self.anchor = None;
+        self.goto = Some(line);
+    }
+
+    /// The source line the cursor is on, or the nearest above it on a row with none.
+    pub fn cursor_line(&self) -> Option<usize> {
+        self.source_line(self.cursor)
+    }
+
     /// Start a selection at the cursor, or drop the one there is.
     pub fn toggle_selection(&mut self) {
         self.anchor = match self.anchor {
@@ -172,18 +223,33 @@ impl Doc {
     /// The source lines the selection covers, or the cursor's row without one; `None` when no
     /// source line feeds those rows.
     pub fn selection(&self) -> Option<Lines> {
-        let rows = self.rows.get(self.selected_rows())?;
-        rows.iter().filter_map(|row| row.source).reduce(Lines::union)
+        self.selected_rows().filter_map(|index| self.source(index)).reduce(Lines::union)
     }
 
     /// Whether row `index` shows part of the selection: one of the rows it spans, or another row
     /// of the same source lines, like a long line's continuation.
     pub fn is_selected(&self, index: usize) -> bool {
         let shared = || {
-            let source = self.rows.get(index).and_then(|row| row.source);
+            let source = self.source(index);
             self.selection().zip(source).is_some_and(|(selection, row)| selection.contains(row))
         };
         self.selected_rows().contains(&index) || shared()
+    }
+
+    /// The last row showing part of the selection.
+    pub fn selection_end(&self) -> usize {
+        let end = *self.selected_rows().end();
+        (end..self.shown.len()).take_while(|&index| self.is_selected(index)).last().unwrap_or(end)
+    }
+
+    /// The comment whose card the cursor is on, or else the first on the cursor's lines.
+    pub fn comment_at_cursor(&self, comments: &Comments) -> Option<u64> {
+        if let Some(Shown::Card { comment, .. }) = self.shown.get(self.cursor) {
+            return Some(*comment);
+        }
+        let lines = self.source(self.cursor)?;
+        let on_lines = |(_, comment): &(u64, &comment::Comment)| comment.lines.overlaps(lines);
+        comments.in_file(&self.path).into_iter().find(on_lines).map(|(id, _)| id)
     }
 
     fn selected_rows(&self) -> RangeInclusive<usize> {
@@ -191,36 +257,79 @@ impl Doc {
         anchor.min(self.cursor)..=anchor.max(self.cursor)
     }
 
-    fn source_line(&self, row: usize) -> Option<usize> {
-        self.rows.get(..=row)?.iter().rev().find_map(|row| row.source).map(|source| source.first)
+    fn line(&self, index: usize) -> &Line<'static> {
+        match &self.shown[index] {
+            Shown::Source(row) => &self.rows[*row].line,
+            Shown::Card { line, .. } => line,
+        }
+    }
+
+    fn source(&self, index: usize) -> Option<Lines> {
+        match self.shown.get(index)? {
+            Shown::Source(row) => self.rows[*row].source,
+            Shown::Card { .. } => None,
+        }
+    }
+
+    /// The first source line of row `index`, or of the nearest row above it with one.
+    fn source_line(&self, index: usize) -> Option<usize> {
+        let above = (0..=index.min(self.last_row())).rev();
+        above.filter_map(|index| self.source(index)).map(|source| source.first).next()
     }
 
     fn last_row(&self) -> usize {
-        self.rows.len().saturating_sub(1)
+        self.shown.len().saturating_sub(1)
     }
 
     fn max_scroll(&self, height: usize) -> usize {
-        self.rows.len().saturating_sub(height)
+        self.shown.len().saturating_sub(height)
     }
 }
 
-/// The first row showing source line `line`, or the first after it when none does.
-fn row_for(rows: &[Row], line: usize) -> usize {
-    let shows = |row: &Row| row.source.is_some_and(|source| source.last >= line);
-    rows.iter().position(shows).unwrap_or(rows.len().saturating_sub(1))
+/// `rows` with each comment on `file` carded under the last row of its lines.
+fn with_cards(rows: &[Row], file: &Path, comments: &Comments, width: u16) -> Vec<Shown> {
+    let cards: Vec<(usize, u64, Vec<Line<'static>>)> = comments
+        .in_file(file)
+        .into_iter()
+        .map(|(id, comment)| {
+            let last = comment.lines.last;
+            let shows = |row: &Row| row.source.is_some_and(|source| source.first <= last);
+            let under = rows.iter().rposition(shows).unwrap_or(rows.len().saturating_sub(1));
+            (under, id, comment::card(comment, width))
+        })
+        .collect();
+    rows.iter()
+        .enumerate()
+        .flat_map(|(index, _)| {
+            let under = cards.iter().filter(move |(row, _, _)| *row == index);
+            let card_lines = under.flat_map(|(_, id, lines)| {
+                lines.iter().map(|line| Shown::Card { comment: *id, line: line.clone() })
+            });
+            std::iter::once(Shown::Source(index)).chain(card_lines)
+        })
+        .collect()
 }
 
-fn read(path: &Path, bytes: &[u8]) -> Content {
+/// The first row on screen showing source line `line`, or the first after it when none does.
+fn row_for(rows: &[Row], shown: &[Shown], line: usize) -> usize {
+    let shows = |item: &Shown| match item {
+        Shown::Source(row) => rows[*row].source.is_some_and(|source| source.last >= line),
+        Shown::Card { .. } => false,
+    };
+    shown.iter().position(shows).unwrap_or(shown.len().saturating_sub(1))
+}
+
+fn read(path: &Path, bytes: &[u8]) -> (Content, String) {
     // Git's test: a NUL among the first 8000 bytes.
     if bytes.iter().take(8000).any(|byte| *byte == 0) {
-        return Content::Binary;
+        return (Content::Binary, String::new());
     }
-    let text = String::from_utf8_lossy(bytes);
+    let text = String::from_utf8_lossy(bytes).into_owned();
     if is_markdown(path) {
-        return Content::Markdown(text.into_owned());
+        return (Content::Markdown, text);
     }
     let lines: Vec<&str> = text.lines().collect();
-    Content::Code(highlight::highlight(path, &lines))
+    (Content::Code(highlight::highlight(path, &lines)), text)
 }
 
 pub fn is_markdown(path: &Path) -> bool {
@@ -240,16 +349,20 @@ mod tests {
         dir.join("doc.md")
     }
 
+    fn lines(doc: &mut Doc, width: u16) -> Vec<Line<'static>> {
+        doc.page(width, 100, &Comments::default(), 0)
+    }
+
     #[test]
     fn a_change_on_disk_is_picked_up() {
         let path = temp("change");
         fs::write(&path, "one").unwrap();
         let mut doc = Doc::open(path.clone());
-        assert_eq!(doc.rows(20)[0].line.to_string(), "one");
+        assert_eq!(lines(&mut doc, 20)[0].to_string(), "one");
 
         fs::write(&path, "two words").unwrap();
         doc.refresh();
-        assert_eq!(doc.rows(20)[0].line.to_string(), "two words");
+        assert_eq!(lines(&mut doc, 20)[0].to_string(), "two words");
     }
 
     #[test]
@@ -261,12 +374,12 @@ mod tests {
         fs::remove_file(&path).unwrap();
         doc.refresh();
         assert!(doc.is_missing());
-        assert_eq!(doc.rows(20)[0].line.to_string(), "kept");
+        assert_eq!(lines(&mut doc, 20)[0].to_string(), "kept");
 
         fs::write(&path, "back").unwrap();
         doc.refresh();
         assert!(!doc.is_missing());
-        assert_eq!(doc.rows(20)[0].line.to_string(), "back");
+        assert_eq!(lines(&mut doc, 20)[0].to_string(), "back");
     }
 
     #[test]
@@ -274,9 +387,9 @@ mod tests {
         let dir = temp("kinds").with_file_name("");
         fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
         fs::write(dir.join("blob.bin"), [0x89, 0, 1]).unwrap();
-        assert_eq!(Doc::open(dir.join("main.rs")).rows(20)[0].line.to_string(), "1 fn main() {}");
+        assert_eq!(lines(&mut Doc::open(dir.join("main.rs")), 20)[0].to_string(), "1 fn main() {}");
         assert_eq!(
-            Doc::open(dir.join("blob.bin")).rows(30)[0].line.to_string(),
+            lines(&mut Doc::open(dir.join("blob.bin")), 30)[0].to_string(),
             "Binary file, not shown."
         );
     }
@@ -286,7 +399,7 @@ mod tests {
         let path = temp("scroll");
         fs::write(&path, "a\n\nb\n\nc").unwrap();
         let mut doc = Doc::open(path);
-        doc.rows(20);
+        doc.build(20, &Comments::default());
         doc.scroll_by(10, 2);
         assert_eq!((doc.scroll, doc.cursor()), (3, 3));
         doc.scroll_by(-10, 2);
@@ -298,7 +411,7 @@ mod tests {
         let path = temp("cursor").with_file_name("cursor.rs");
         fs::write(&path, "1\n2\n3\n4\n5\n").unwrap();
         let mut doc = Doc::open(path);
-        doc.rows(20);
+        doc.build(20, &Comments::default());
         doc.move_cursor(3, 2);
         assert_eq!((doc.cursor(), doc.scroll), (3, 2));
         doc.move_cursor(10, 2);
@@ -312,7 +425,7 @@ mod tests {
         let path = temp("select").with_file_name("select.rs");
         fs::write(&path, "one\ntwo\nthree\n").unwrap();
         let mut doc = Doc::open(path);
-        doc.rows(20);
+        doc.build(20, &Comments::default());
         assert_eq!(doc.selection(), Some(Lines::one(1)));
         doc.move_cursor(2, 10);
         doc.toggle_selection();
@@ -327,15 +440,41 @@ mod tests {
         let path = temp("wrap").with_file_name("wrap.rs");
         fs::write(&path, "a\nbbbbbbbb\nc\n").unwrap();
         let mut doc = Doc::open(path);
-        doc.rows(6);
+        doc.build(6, &Comments::default());
         doc.move_cursor(3, 10);
         assert_eq!(doc.selection(), Some(Lines::one(3)));
         doc.move_cursor(-2, 10);
         assert_eq!(doc.selection(), Some(Lines::one(2)));
         assert!(doc.is_selected(1) && doc.is_selected(2) && !doc.is_selected(3));
 
-        doc.rows(20);
+        doc.build(20, &Comments::default());
         assert_eq!(doc.cursor(), 1);
         assert_eq!(doc.selection(), Some(Lines::one(2)));
+    }
+
+    #[test]
+    fn a_comment_s_card_sits_under_its_last_line_and_the_cursor_can_land_on_it() {
+        let path = temp("cards").with_file_name("cards.rs");
+        fs::write(&path, "a\nb\nc\n").unwrap();
+        let mut doc = Doc::open(path.clone());
+        let mut comments = Comments::default();
+        comments.add(comment::Comment {
+            file: path,
+            lines: Lines { first: 1, last: 2 },
+            snippet: "a\nb".to_owned(),
+            text: "hm".to_owned(),
+            outdated: false,
+        });
+        let shown: Vec<String> =
+            doc.page(12, 10, &comments, 0).iter().map(Line::to_string).collect();
+        assert_eq!(shown, ["1 a", "2 b", "╭ L1–2 ────╮", "│ hm       │", "╰──────────╯", "3 c"]);
+        assert_eq!(doc.comment_at_cursor(&comments), Some(0));
+        doc.move_cursor(3, 10);
+        assert_eq!((doc.selection(), doc.comment_at_cursor(&comments)), (None, Some(0)));
+        doc.move_cursor(2, 10);
+        assert_eq!(
+            (doc.selection(), doc.comment_at_cursor(&comments)),
+            (Some(Lines::one(3)), None)
+        );
     }
 }
