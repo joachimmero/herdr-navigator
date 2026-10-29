@@ -7,6 +7,8 @@ use std::thread;
 
 use ignore::WalkBuilder;
 
+use crate::doc::is_markdown;
+
 enum Scan {
     Idle,
     Running(Receiver<Vec<PathBuf>>),
@@ -110,12 +112,6 @@ fn discover(root: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort_by_key(|file| file.to_string_lossy().to_lowercase());
     files
-}
-
-fn is_markdown(path: &Path) -> bool {
-    path.extension().is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
-    })
 }
 
 #[cfg(test)]

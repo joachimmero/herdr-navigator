@@ -9,6 +9,8 @@ A [herdr](https://herdr.dev) plugin that opens a pane for reading markdown files
 - With no file to show, the pane lists the project's markdown files to pick from.
 - Headings, emphasis, lists and task lists, quotes, code blocks, rules, links (with their target
   shown), footnotes, and tables, which shrink their columns and wrap cells to fit the pane.
+- Any other file shows as its source, syntax-highlighted in the terminal's own colors, with line
+  numbers. A binary file shows a notice instead.
 
 ## Requirements
 

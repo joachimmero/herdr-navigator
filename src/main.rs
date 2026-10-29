@@ -1,8 +1,10 @@
 mod actions;
 mod app;
 mod client;
+mod code;
 mod doc;
 mod herdr;
+mod highlight;
 mod inbox;
 mod markdown;
 mod picker;
