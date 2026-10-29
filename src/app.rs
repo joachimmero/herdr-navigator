@@ -18,7 +18,7 @@ use ratatui::layout::{Position, Rect};
 
 use crate::comment::{self, Comment, Comments};
 use crate::composer::{Composer, Target};
-use crate::doc::Doc;
+use crate::doc::{Doc, Spot};
 use crate::field::Field;
 use crate::herdr::{self, Agent};
 use crate::inbox::Inbox;
@@ -49,8 +49,11 @@ pub enum Mode {
         selected: usize,
     },
     Search(Box<Search>),
-    /// Finding text in the file.
-    Find(Field),
+    /// Finding text in the file, and where the cursor was before, for `Esc` to go back to.
+    Find {
+        field: Field,
+        from: Spot,
+    },
 }
 
 pub struct App {
@@ -63,6 +66,8 @@ pub struct App {
     pub notice: Option<String>,
     /// A place pointed at while a comment was being written, which `⏎` goes to once it's done.
     pub pending: Option<Location>,
+    /// What the last find kept, never empty: marked in every file, and what `n` `N` go to.
+    pub found: Option<String>,
     jumps: Jumps,
     /// Whether markdown shows rendered rather than as its source, in every file the pane opens.
     rendered: bool,
@@ -129,6 +134,7 @@ impl App {
             mode: Mode::Browse,
             notice: None,
             pending: None,
+            found: None,
             jumps: Jumps::default(),
             rendered: true,
             searcher: None,
@@ -306,7 +312,7 @@ impl App {
         match &mut self.mode {
             Mode::Picker { .. } => return self.on_picker_key(key),
             Mode::Search(_) => return self.on_search_key(key, panes),
-            Mode::Find(_) => return self.on_find_key(key),
+            Mode::Find { .. } => return self.on_find_key(key),
             Mode::Composing(composer) => {
                 if on_composer_key(&mut composer.field, key) {
                     self.finish_composing(key.code == KeyCode::Enter);
@@ -332,13 +338,14 @@ impl App {
                 self.go(pending);
             }
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('n') => self.next_comment(true),
-            KeyCode::Char('N') => self.next_comment(false),
+            KeyCode::Char('n') => self.next(true),
+            KeyCode::Char('N') => self.next(false),
             KeyCode::Char('s') => self.send(),
             KeyCode::Char('y') => self.copy(),
             KeyCode::Char('/') => self.open_find(),
             _ => match (self.focus, &mut self.doc) {
                 (Focus::File, Some(doc)) => match key.code {
+                    KeyCode::Esc if self.found.take().is_some() => {}
                     KeyCode::Esc if doc.clear_selection() => {}
                     KeyCode::Tab | KeyCode::Esc => self.focus = Focus::Tree,
                     KeyCode::Char('c') => self.compose(),
@@ -386,7 +393,7 @@ impl App {
                 KeyCode::Char('u') => self.move_half_page(-1, panes.page()),
                 _ => {}
             },
-            Mode::List { .. } | Mode::Picker { .. } | Mode::Find(_) => {}
+            Mode::List { .. } | Mode::Picker { .. } | Mode::Find { .. } => {}
         }
     }
 
@@ -446,6 +453,20 @@ impl App {
             }
             Target::Edit(id) => self.comments.set_text(id, text),
         }
+    }
+
+    /// Go to the next place the kept find is found after the cursor, or the one before it, and
+    /// to the next comment without one.
+    fn next(&mut self, forward: bool) {
+        let (Some(query), Some(doc)) = (&self.found, &mut self.doc) else {
+            return self.next_comment(forward);
+        };
+        if doc.found(query).1 == 0 {
+            self.notice = Some(format!("{query} not found"));
+            return;
+        }
+        doc.find(query, if forward { 1 } else { -1 });
+        self.focus = Focus::File;
     }
 
     /// Go to the next comment after the cursor in file and line order, or the one before it,
@@ -614,15 +635,32 @@ impl App {
         if let Some(doc) = &mut self.doc {
             doc.clear_selection();
             self.focus = Focus::File;
-            self.mode = Mode::Find(Field::new(String::new()));
+            self.mode = Mode::Find { field: Field::new(String::new()), from: doc.spot() };
         }
     }
 
     fn on_find_key(&mut self, key: KeyEvent) {
-        let (Mode::Find(field), Some(doc)) = (&mut self.mode, &mut self.doc) else { return };
+        let (Mode::Find { field, from }, Some(doc)) = (&mut self.mode, &mut self.doc) else {
+            return;
+        };
         match key.code {
-            KeyCode::Esc => self.mode = Mode::Browse,
-            KeyCode::Enter | KeyCode::Down => doc.find(&field.text, 1),
+            KeyCode::Esc => {
+                doc.return_to(*from);
+                self.mode = Mode::Browse;
+            }
+            KeyCode::Enter => {
+                let query = std::mem::take(&mut field.text);
+                match doc.found(&query).1 {
+                    _ if query.is_empty() => doc.return_to(*from),
+                    0 => {
+                        doc.return_to(*from);
+                        self.notice = Some(format!("{query} not found"));
+                    }
+                    _ => self.found = Some(query),
+                }
+                self.mode = Mode::Browse;
+            }
+            KeyCode::Down => doc.find(&field.text, 1),
             KeyCode::Up => doc.find(&field.text, -1),
             _ => {
                 let before = field.text.clone();

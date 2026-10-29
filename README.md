@@ -72,7 +72,7 @@ In a file:
 | `v` | Start selecting lines at the cursor, or stop |
 | `c` | Comment on the selection, or the cursor's line |
 | `e` `d` | Edit, delete the comment at the cursor |
-| `n` `N` | Go to the next, previous comment, in any file |
+| `n` `N` | Go to the next, previous place the kept find is at, or else comment in any file |
 | `Ctrl+o` `Ctrl+i` | Go back to where a jump left from, forward again |
 | `/` | Find text in the file |
 | `Ctrl+f` | Search the project |
@@ -80,7 +80,7 @@ In a file:
 | `l` | List every comment |
 | `s` | Send every comment to an agent |
 | `y` | Copy every comment |
-| `Esc` | Drop the selection, or go to the tree |
+| `Esc` | Drop the find, or the selection, or go to the tree |
 | `Tab` | Go to the tree |
 | `q` | Close the pane |
 
@@ -109,16 +109,22 @@ Dragging over the file copies the text as it's shown, without line numbers or bu
 break at the end of each row on screen. Dragging past the top or bottom scrolls. The copied text
 stays marked until the next key or click.
 
-Pointing from the command line, `n` `N`, opening a search result, and `⏎` in the comment list
-are jumps: `Ctrl+o` goes back to where each one left from, like vim's jumplist. `Ctrl+i` needs a
-terminal that tells it apart from `Tab`; inside tmux it arrives as `Tab`.
+Pointing from the command line, `n` `N` between comments, opening a search result, and `⏎` in the
+comment list are jumps: `Ctrl+o` goes back to where each one left from, like vim's jumplist.
+`Ctrl+i` needs a terminal that tells it apart from `Tab`; inside tmux it arrives as `Tab`.
 
 ## Find in file
 
 `/` opens a band under the file and moves the cursor to the text as you type, marking each
-place it's found. Case matters only when what you type holds a capital. `⏎` or `↓` go to the next
-place, `↑` to the previous, and `Esc` closes the band, leaving the cursor where it is. Comment
-cards aren't searched, and text broken across a wrapped line isn't found.
+place it's found. Case matters only when what you type holds a capital. `↓` goes to the next
+place and `↑` to the previous.
+
+`⏎` closes the band and keeps the find, or cancels when nothing is found: its places stay marked, in every file you open, and the
+title bar shows it with which place the cursor is on. While it's kept, `n` `N` go to the next,
+previous place, wrapping around, instead of the next comment. `Esc` in the file drops it.
+
+`Esc` in the band cancels, putting the cursor back where it was and keeping any earlier find.
+Comment cards aren't searched, and text broken across a wrapped line isn't found.
 
 ## Search
 

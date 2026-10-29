@@ -78,7 +78,7 @@ pub fn panes(area: Rect, app: &App) -> Panes {
         }
     };
     let (file, find) = match (file, &app.mode) {
-        (Some(file), Mode::Find(_)) => {
+        (Some(file), Mode::Find { .. }) => {
             let [file, find] =
                 Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(file);
             (Some(file), Some(find))
@@ -138,14 +138,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             if let (Some(area), Some(doc)) = (panes.file, &mut app.doc) {
                 let (composer, find) = match &app.mode {
                     Mode::Composing(composer) => (Some(composer), None),
-                    Mode::Find(field) => (None, Some(field)),
+                    Mode::Find { field, .. } => (None, Some(field)),
                     _ => (None, None),
                 };
                 let focused = app.focus == Focus::File;
-                let query = find.map(|field| &*field.text);
+                let query = find.map(|field| &*field.text).or(app.found.as_deref());
                 status = draw_doc(frame, doc, &app.comments, composer, query, area, focused);
-                if let (Some(field), Some(band)) = (find, panes.find) {
-                    draw_find(frame, field, doc, band);
+                match (find, panes.find, &app.found) {
+                    (Some(field), Some(band), _) => draw_find(frame, field, doc, band),
+                    (None, _, Some(found)) => {
+                        let label = format!("/{found} {} ", found_label(doc, found));
+                        status.insert(0, Span::raw(label));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -410,17 +415,24 @@ fn draw_find(frame: &mut Frame, field: &Field, doc: &Doc, area: Rect) {
         true => Span::styled("Find in file…", dim()),
         false => Span::raw(field.text.clone()),
     };
-    let count = match doc.found(&field.text) {
-        _ if field.text.is_empty() => String::new(),
-        (_, 0) => "no matches".into(),
-        (Some(here), total) => format!("{here}/{total}"),
-        (None, total) => total.to_string(),
+    let count = match field.text.is_empty() {
+        true => String::new(),
+        false => found_label(doc, &field.text),
     };
     let column = field.rows(usize::MAX).1.1;
     let caret = u16::try_from(label.width() + column).unwrap_or(u16::MAX);
     frame.render_widget(Paragraph::new(Line::from(vec![label, query])), area);
     frame.render_widget(Paragraph::new(Line::styled(count, dim()).right_aligned()), area);
     frame.set_cursor_position((area.x + caret.min(area.width.saturating_sub(1)), area.y));
+}
+
+/// Which of the rows `query` is found on the cursor is on, out of how many.
+fn found_label(doc: &Doc, query: &str) -> String {
+    match doc.found(query) {
+        (_, 0) => "no matches".into(),
+        (Some(here), total) => format!("{here}/{total}"),
+        (None, total) => total.to_string(),
+    }
 }
 
 fn draw_search(

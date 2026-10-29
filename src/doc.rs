@@ -59,6 +59,13 @@ enum Shown {
     Card { comment: u64, line: Line<'static> },
 }
 
+/// Where the cursor and the view were, to put them back.
+#[derive(Clone, Copy)]
+pub struct Spot {
+    cursor: usize,
+    scroll: usize,
+}
+
 pub struct Doc {
     pub path: PathBuf,
     content: Content,
@@ -226,6 +233,15 @@ impl Doc {
 
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    pub fn spot(&self) -> Spot {
+        Spot { cursor: self.cursor, scroll: self.scroll }
+    }
+
+    pub fn return_to(&mut self, spot: Spot) {
+        self.cursor = spot.cursor.min(self.last_row());
+        self.scroll = spot.scroll;
     }
 
     /// Move the cursor by `delta` rows, scrolling a page of `height` rows to keep it on screen.
