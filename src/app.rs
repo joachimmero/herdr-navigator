@@ -117,17 +117,6 @@ fn is_quit(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-fn half_page_direction(key: &KeyEvent) -> Option<isize> {
-    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('d') => Some(1),
-        KeyCode::Char('u') => Some(-1),
-        _ => None,
-    }
-}
-
 impl App {
     fn new(mut tree: Tree, inbox: Option<Inbox>, location: Option<Location>) -> Self {
         tree.rescan();
@@ -311,6 +300,9 @@ impl App {
         if let Some(doc) = &mut self.doc {
             doc.clear_drag();
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return self.on_chord(key, panes);
+        }
         match &mut self.mode {
             Mode::Picker { .. } => return self.on_picker_key(key),
             Mode::Search(_) => return self.on_search_key(key, panes),
@@ -327,26 +319,7 @@ impl App {
             }
             Mode::Browse => {}
         }
-        let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('o') if control => {
-                let back = self.here().and_then(|here| self.jumps.back(here));
-                if let Some(place) = back {
-                    self.visit(place);
-                }
-            }
-            KeyCode::Char('i') if control => {
-                if let Some(place) = self.jumps.forward() {
-                    self.visit(place);
-                }
-            }
-            KeyCode::Char('f') if control => {
-                if let Some(doc) = &mut self.doc {
-                    doc.clear_selection();
-                    self.focus = Focus::File;
-                    self.mode = Mode::Find(Field::new(String::new()));
-                }
-            }
             KeyCode::Char('m') => match &mut self.doc {
                 Some(doc) if doc.is_markdown() => {
                     self.rendered = !self.rendered;
@@ -378,8 +351,60 @@ impl App {
                     KeyCode::Char('l') => self.mode = Mode::List { selected: 0 },
                     _ => on_doc_key(doc, key, panes.page()),
                 },
-                _ => self.on_tree_key(key, panes.page()),
+                _ => self.on_tree_key(key),
             },
+        }
+    }
+
+    /// Act on a key pressed with `Ctrl`, which never does what the key alone does.
+    fn on_chord(&mut self, key: KeyEvent, panes: &Panes) {
+        match &mut self.mode {
+            Mode::Composing(composer) => {
+                if key.code == KeyCode::Char('j') {
+                    composer.field.insert('\n');
+                }
+            }
+            Mode::Search(search) => match key.code {
+                KeyCode::Char('n') => search.move_pick(1),
+                KeyCode::Char('p') => search.move_pick(-1),
+                _ => {}
+            },
+            Mode::Browse => match key.code {
+                KeyCode::Char('o') => {
+                    let back = self.here().and_then(|here| self.jumps.back(here));
+                    if let Some(place) = back {
+                        self.visit(place);
+                    }
+                }
+                KeyCode::Char('i') => {
+                    if let Some(place) = self.jumps.forward() {
+                        self.visit(place);
+                    }
+                }
+                KeyCode::Char('f') => {
+                    if let Some(doc) = &mut self.doc {
+                        doc.clear_selection();
+                        self.focus = Focus::File;
+                        self.mode = Mode::Find(Field::new(String::new()));
+                    }
+                }
+                KeyCode::Char('d') => self.move_half_page(1, panes.page()),
+                KeyCode::Char('u') => self.move_half_page(-1, panes.page()),
+                _ => {}
+            },
+            Mode::List { .. } | Mode::Picker { .. } | Mode::Find(_) => {}
+        }
+    }
+
+    /// Move the focused side half a page down for a positive `direction`, up for a negative one.
+    fn move_half_page(&mut self, direction: isize, page: usize) {
+        let delta = direction * (page / 2).max(1) as isize;
+        match (self.focus, &mut self.doc) {
+            (Focus::File, Some(doc)) => doc.page_by(delta, page),
+            _ => {
+                self.tree.move_by(delta);
+                self.follow_tree();
+            }
         }
     }
 
@@ -615,7 +640,6 @@ impl App {
 
     fn on_search_key(&mut self, key: KeyEvent, panes: &Panes) {
         let Mode::Search(search) = &mut self.mode else { return };
-        let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let page = panes.search.as_ref().map_or(1, |screen| usize::from(screen.preview.height));
         match key.code {
             KeyCode::Esc => self.mode = Mode::Browse,
@@ -625,8 +649,6 @@ impl App {
             KeyCode::PageUp => search.scroll_preview(-(page as isize), page),
             KeyCode::Down => search.move_pick(1),
             KeyCode::Up => search.move_pick(-1),
-            KeyCode::Char('n') if control => search.move_pick(1),
-            KeyCode::Char('p') if control => search.move_pick(-1),
             _ => {
                 let before = search.field.text.clone();
                 on_field_key(&mut search.field, key);
@@ -679,13 +701,8 @@ impl App {
         self.go(Location { file, lines: line.map(Lines::one) });
     }
 
-    fn on_tree_key(&mut self, key: KeyEvent, page: usize) {
+    fn on_tree_key(&mut self, key: KeyEvent) {
         let tree = &mut self.tree;
-        if let Some(direction) = half_page_direction(&key) {
-            tree.move_by(direction * (page / 2).max(1) as isize);
-            self.follow_tree();
-            return;
-        }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => tree.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => tree.move_by(-1),
@@ -709,10 +726,8 @@ impl App {
 /// Edit the comment box, saying whether the key closes it: `Enter` to save, `Esc` to cancel.
 fn on_composer_key(field: &mut Field, key: KeyEvent) -> bool {
     let newline = key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
-    let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Enter if newline => field.insert('\n'),
-        KeyCode::Char('j') if control => field.insert('\n'),
         KeyCode::Enter | KeyCode::Esc => return true,
         _ => on_field_key(field, key),
     }
@@ -728,16 +743,12 @@ fn on_field_key(field: &mut Field, key: KeyEvent) {
         KeyCode::Right => field.right(),
         KeyCode::Home => field.home(),
         KeyCode::End => field.end(),
-        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => field.insert(ch),
+        KeyCode::Char(ch) => field.insert(ch),
         _ => {}
     }
 }
 
 fn on_doc_key(doc: &mut Doc, key: KeyEvent, page: usize) {
-    if let Some(direction) = half_page_direction(&key) {
-        doc.page_by(direction * (page / 2).max(1) as isize, page);
-        return;
-    }
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => doc.move_cursor(1, page),
         KeyCode::Char('k') | KeyCode::Up => doc.move_cursor(-1, page),
