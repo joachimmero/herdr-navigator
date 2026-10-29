@@ -1,7 +1,9 @@
 //! The pane: its state, its keys, and its loop.
 
-use std::io;
+use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use ratatui::DefaultTerminal;
@@ -12,10 +14,10 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 
-use crate::comment::{Comment, Comments};
+use crate::comment::{self, Comment, Comments};
 use crate::composer::{Composer, Target};
 use crate::doc::Doc;
-use crate::herdr;
+use crate::herdr::{self, Agent};
 use crate::inbox::Inbox;
 use crate::tree::Tree;
 use crate::ui::{self, Panes};
@@ -34,6 +36,11 @@ pub enum Mode {
     List {
         selected: usize,
     },
+    /// The agents to send the comments to, and the highlighted one.
+    Picker {
+        agents: Vec<Agent>,
+        selected: usize,
+    },
 }
 
 pub struct App {
@@ -42,6 +49,10 @@ pub struct App {
     pub focus: Focus,
     pub comments: Comments,
     pub mode: Mode,
+    /// What the last key did, when that needs saying; the next key clears it.
+    pub notice: Option<String>,
+    /// The pane the comments last went to, which the picker opens on.
+    last_sent: Option<String>,
     /// Where `herdr-navigator <file>` posts files for this pane; `None` outside herdr.
     inbox: Option<Inbox>,
     quit: bool,
@@ -97,6 +108,8 @@ impl App {
             focus: Focus::Tree,
             comments: Comments::default(),
             mode: Mode::Browse,
+            notice: None,
+            last_sent: None,
             inbox,
             quit: false,
         };
@@ -205,7 +218,9 @@ impl App {
             self.quit = true;
             return;
         }
+        self.notice = None;
         match &mut self.mode {
+            Mode::Picker { .. } => return self.on_picker_key(key),
             Mode::Composing(composer) => {
                 if on_composer_key(composer, key) {
                     self.finish_composing(key.code == KeyCode::Enter);
@@ -222,6 +237,8 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('n') => self.next_comment(true),
             KeyCode::Char('N') => self.next_comment(false),
+            KeyCode::Char('s') => self.send(),
+            KeyCode::Char('y') => self.copy(),
             _ => match (self.focus, &mut self.doc) {
                 (Focus::File, Some(doc)) => match key.code {
                     KeyCode::Esc if doc.clear_selection() => {}
@@ -310,6 +327,94 @@ impl App {
         self.show(file);
         if let Some(doc) = &mut self.doc {
             doc.go_to_line(line);
+        }
+    }
+
+    /// Send every comment to the workspace's one agent, or let a picker choose among several.
+    fn send(&mut self) {
+        if self.comments.len() == 0 {
+            self.notice = Some("no comments yet".into());
+            return;
+        }
+        match herdr::agents() {
+            Ok(agents) if agents.is_empty() => {
+                self.notice = Some("no agent in this workspace, press y to copy".into());
+            }
+            Ok(agents) if agents.len() == 1 => self.send_to(&agents[0]),
+            Ok(agents) => {
+                let last = self.last_sent.as_deref();
+                let selected = agents.iter().position(|agent| Some(&*agent.pane) == last);
+                self.mode = Mode::Picker { agents, selected: selected.unwrap_or(0) };
+            }
+            Err(error) => self.notice = Some(format!("{error}, press y to copy")),
+        }
+    }
+
+    /// Send every comment to `agent`, letting go of them once it has them.
+    fn send_to(&mut self, agent: &Agent) {
+        let count = self.comments.len();
+        let text = self.export();
+        match herdr::send(&agent.pane, &text) {
+            Ok(()) => {
+                self.comments.clear();
+                self.last_sent = Some(agent.pane.clone());
+                self.notice = Some(format!("sent {} to {}", comment::counted(count), agent.name));
+            }
+            Err(error) => self.notice = Some(format!("{error}, press y to copy")),
+        }
+    }
+
+    /// Copy every comment to the clipboard, letting go of them once it has them.
+    fn copy(&mut self) {
+        if self.comments.len() == 0 {
+            self.notice = Some("no comments yet".into());
+            return;
+        }
+        let count = self.comments.len();
+        let text = self.export();
+        match pbcopy(&text) {
+            Ok(()) => {
+                self.comments.clear();
+                self.notice = Some(format!("copied {}", comment::counted(count)));
+            }
+            Err(error) => self.notice = Some(format!("copy failed: {error}")),
+        }
+    }
+
+    /// Every comment as the message it is sent as, each first followed to where its lines sit in
+    /// the file now, open or not.
+    fn export(&mut self) -> String {
+        for file in self.comments.files() {
+            let source = fs::read_to_string(&file).unwrap_or_default();
+            self.comments.reanchor(&file, &source);
+        }
+        let sorted = self.comments.sorted();
+        let comments: Vec<&Comment> = sorted.iter().map(|(_, comment)| *comment).collect();
+        comment::format_all(&comments, &self.tree.root)
+    }
+
+    fn on_picker_key(&mut self, key: KeyEvent) {
+        let Mode::Picker { agents, selected } = &mut self.mode else { return };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                *selected = (*selected + 1).min(agents.len().saturating_sub(1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => *selected = selected.saturating_sub(1),
+            KeyCode::Char(digit @ '1'..='9') => {
+                let row = usize::from(digit as u8 - b'1');
+                if row < agents.len() {
+                    *selected = row;
+                }
+            }
+            KeyCode::Enter => {
+                let agent = agents.get(*selected).cloned();
+                self.mode = Mode::Browse;
+                if let Some(agent) = agent {
+                    self.send_to(&agent);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Browse,
+            _ => {}
         }
     }
 
@@ -405,5 +510,14 @@ fn on_doc_key(doc: &mut Doc, key: KeyEvent, page: usize) {
         KeyCode::Char('G') | KeyCode::End => doc.move_cursor(isize::MAX, page),
         KeyCode::Char('v') => doc.toggle_selection(),
         _ => {}
+    }
+}
+
+fn pbcopy(text: &str) -> io::Result<()> {
+    let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
+    child.stdin.take().expect("stdin is piped").write_all(text.as_bytes())?;
+    match child.wait()? {
+        status if status.success() => Ok(()),
+        status => Err(io::Error::other(format!("pbcopy {status}"))),
     }
 }

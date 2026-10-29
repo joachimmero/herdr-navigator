@@ -67,6 +67,8 @@ In a file:
 | `e` `d` | Edit, delete the comment at the cursor |
 | `n` `N` | Go to the next, previous comment, in any file |
 | `l` | List every comment |
+| `s` | Send every comment to an agent |
+| `y` | Copy every comment |
 | `Esc` | Drop the selection, or go to the tree |
 | `Tab` | Go to the tree |
 | `q` | Close the pane |
@@ -98,6 +100,23 @@ or `l` closes the list.
 When the file changes, each comment follows the lines it quoted to wherever they now sit, the
 nearest place when they appear more than once. A comment whose lines are gone is marked outdated
 and stays where they last were.
+
+`s` pastes every comment into an agent's input in this workspace, without submitting it, and
+focuses that agent so you can add to it. With several agents a picker opens on the one you sent
+to last; `j` `k` or `1`–`9` choose and `⏎` sends. An agent waiting at a prompt refuses the
+paste. `y` copies the same text instead. Either way the comments are let go of once delivered,
+and each is written as its location, the lines it's on, then what it says:
+
+```
+src/doc.rs:12-14
+fn reflow(&mut self) {
+    self.rows.clear();
+}
+Why clear here rather than on resize?
+```
+
+A comment whose lines are gone is sent with ` (outdated)` after its location and the lines it was
+written on.
 
 ## The tree
 

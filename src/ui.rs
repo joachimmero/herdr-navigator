@@ -7,11 +7,13 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Focus, Mode};
-use crate::comment::Comments;
+use crate::comment::{self, Comments};
 use crate::composer::{Composer, Target};
 use crate::doc::Doc;
+use crate::herdr::Agent;
 use crate::layout::Lines;
 use crate::tree::{Row, Tree};
 
@@ -81,9 +83,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
     if app.comments.len() > 0 {
-        let count = app.comments.len();
-        let noun = if count == 1 { "comment" } else { "comments" };
-        status.insert(0, Span::styled(format!("{count} {noun} "), Style::new().fg(Color::Yellow)));
+        let count = comment::counted(app.comments.len());
+        status.insert(0, Span::styled(format!("{count} "), Style::new().fg(Color::Yellow)));
+    }
+    if let Some(notice) = &app.notice {
+        status.insert(0, Span::styled(format!("{notice} "), Style::new().fg(Color::Cyan)));
+    }
+    if let Mode::Picker { agents, selected } = &app.mode {
+        draw_picker(frame, agents, *selected, frame.area());
     }
     if app.tree.is_scanning() {
         status.insert(0, Span::styled("scanning… ", dim()));
@@ -258,6 +265,50 @@ fn draw_list(frame: &mut Frame, app: &App, selected: usize, area: Rect) {
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The agents to send to, numbered, in a box over the middle of the pane.
+fn draw_picker(frame: &mut Frame, agents: &[Agent], selected: usize, area: Rect) {
+    let name_width = agents.iter().map(|agent| agent.name.width()).max().unwrap_or(0);
+    let lines: Vec<Line> = agents
+        .iter()
+        .enumerate()
+        .map(|(index, agent)| {
+            let number = if index < 9 { format!("{} ", index + 1) } else { "  ".into() };
+            let place = if agent.tab.is_empty() {
+                agent.state.clone()
+            } else {
+                format!("{} · {}", agent.state, agent.tab)
+            };
+            let line = Line::from(vec![
+                Span::styled(number, dim()),
+                Span::raw(format!("{:name_width$}  ", agent.name)),
+                Span::styled(place, dim()),
+            ]);
+            if index == selected {
+                line.style(Style::new().add_modifier(Modifier::REVERSED))
+            } else {
+                line
+            }
+        })
+        .collect();
+    let widest = lines.iter().map(Line::width).max().unwrap_or(0);
+    let width = u16::try_from(widest + 4).unwrap_or(u16::MAX).max(30).min(area.width);
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::Cyan))
+        .title(" send to ")
+        .title_bottom(Line::styled(" ⏎ send · esc cancel ", dim()).right_aligned())
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 fn draw_title(frame: &mut Frame, area: Rect, left: Vec<Span>, right: Vec<Span>) {

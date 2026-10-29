@@ -101,6 +101,20 @@ impl Comments {
         self.sorted().into_iter().filter(|(_, comment)| comment.file == file).collect()
     }
 
+    /// Every file a comment is on.
+    pub fn files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> =
+            self.items.iter().map(|(_, comment)| comment.file.clone()).collect();
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.revision += 1;
+    }
+
     /// Follow each comment on `file` to where its snippet now sits in `source`.
     pub fn reanchor(&mut self, file: &Path, source: &str) {
         let before: Vec<(Lines, bool)> =
@@ -114,6 +128,28 @@ impl Comments {
             self.revision += 1;
         }
     }
+}
+
+/// `count` comments, in words.
+pub fn counted(count: usize) -> String {
+    let noun = if count == 1 { "comment" } else { "comments" };
+    format!("{count} {noun}")
+}
+
+/// `comments` as one message: each its location, the lines it quotes, then what it says,
+/// blank-line separated.
+pub fn format_all(comments: &[&Comment], root: &Path) -> String {
+    comments.iter().map(|comment| format(comment, root)).collect::<Vec<_>>().join("\n\n")
+}
+
+/// An outdated comment still quotes the lines it was written on, marked so the reader knows
+/// they're gone.
+fn format(comment: &Comment, root: &Path) -> String {
+    let location = comment.location(root);
+    let location = if comment.outdated { format!("{location} (outdated)") } else { location };
+    let text: Vec<&str> =
+        comment.text.lines().map(str::trim_end).filter(|line| !line.trim().is_empty()).collect();
+    format!("{location}\n{}\n{}", comment.snippet, text.join("\n"))
 }
 
 /// A comment as a card `width` columns wide: its lines in the top border, its text inside.
@@ -178,6 +214,18 @@ mod tests {
         gone.reanchor("b\n");
         assert!(!gone.outdated);
         assert_eq!(gone.lines, Lines::one(1));
+    }
+
+    #[test]
+    fn comments_send_as_location_snippet_and_text() {
+        let mut first = comment(4, 4, "let x = 1;");
+        first.text = "rename\n\nthis  ".to_owned();
+        let mut second = comment(7, 9, "a\nb\nc");
+        second.outdated = true;
+        assert_eq!(
+            format_all(&[&first, &second], Path::new("/p")),
+            "src/a.rs:4\nlet x = 1;\nrename\nthis\n\nsrc/a.rs:7-9 (outdated)\na\nb\nc\nwhy?"
+        );
     }
 
     #[test]

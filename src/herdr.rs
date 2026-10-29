@@ -1,8 +1,12 @@
 //! The herdr CLI, which is the whole plugin API.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -52,4 +56,138 @@ pub fn state_dir() -> Result<PathBuf, String> {
 /// `id` keeping only the characters a file name can safely hold; herdr ids contain `:`.
 pub fn file_safe(id: &str) -> String {
     id.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect()
+}
+
+/// An agent pane comments can be sent to, as the picker shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Agent {
+    pub pane: String,
+    pub name: String,
+    pub state: String,
+    /// The label of the tab it sits in, or empty.
+    pub tab: String,
+}
+
+/// The agents in this pane's workspace other than this pane, in herdr's order.
+pub fn agents() -> Result<Vec<Agent>, String> {
+    let ws = var("HERDR_WORKSPACE_ID").ok_or("not inside herdr")?;
+    let list = call(&["agent", "list"])?;
+    let tabs = call(&["tab", "list", "--workspace", &ws]).unwrap_or_default();
+    let labels: HashMap<&str, &str> = tabs["tabs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tab| Some((tab["tab_id"].as_str()?, tab["label"].as_str()?)))
+        .collect();
+    Ok(agents_in(&list, &ws, var("HERDR_PANE_ID").as_deref(), &labels))
+}
+
+/// `herdr agent list`'s panes running an agent in workspace `ws`, pane `me` left out.
+fn agents_in(list: &Value, ws: &str, me: Option<&str>, tabs: &HashMap<&str, &str>) -> Vec<Agent> {
+    fn text<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
+        entry[key].as_str().filter(|text| !text.is_empty())
+    }
+    list["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| text(entry, "agent").is_some() && text(entry, "workspace_id") == Some(ws))
+        .filter_map(|entry| {
+            let pane = text(entry, "pane_id").filter(|pane| Some(*pane) != me)?;
+            let name = ["name", "display_agent", "agent"]
+                .into_iter()
+                .find_map(|key| text(entry, key))
+                .unwrap_or(pane);
+            let status = text(entry, "agent_status").unwrap_or_default();
+            let state = entry["state_labels"][status].as_str().filter(|label| !label.is_empty());
+            let tab = text(entry, "tab_id").and_then(|tab| tabs.get(tab)).copied();
+            Some(Agent {
+                pane: pane.to_owned(),
+                name: name.to_owned(),
+                state: state.unwrap_or(status).to_owned(),
+                tab: tab.unwrap_or_default().to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// The largest request herdr reads in time.
+const MAX_REQUEST_BYTES: usize = 256 * 1024;
+/// herdr's read window, plus time to answer.
+const SEND_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Paste `text` into agent `pane`'s input, unsubmitted, in one request, then focus the pane.
+/// An agent waiting at a prompt refuses, since the prompt would swallow the paste.
+pub fn send(pane: &str, text: &str) -> Result<(), String> {
+    let socket = var("HERDR_SOCKET_PATH").ok_or("not inside herdr")?;
+    // The paste's end marker inside the text would end the paste early.
+    let body = text.replace("\x1b[201~", "");
+    let request = serde_json::json!({
+        "id": "herdr-navigator:send",
+        "method": "pane.send_text",
+        "params": {"pane_id": pane, "text": format!("\x1b[200~{body}\x1b[201~")},
+    })
+    .to_string();
+    if request.len() > MAX_REQUEST_BYTES {
+        return Err("too much to send".into());
+    }
+    let list = call(&["agent", "list"])?;
+    let entries = list["agents"].as_array().into_iter().flatten();
+    let agent = entries
+        .filter(|entry| entry["agent"].as_str().is_some_and(|agent| !agent.is_empty()))
+        .find(|entry| entry["pane_id"].as_str() == Some(pane))
+        .ok_or("the agent closed")?;
+    if agent["agent_status"].as_str() == Some("blocked") {
+        return Err("answer the agent's prompt first".into());
+    }
+    let reply =
+        exchange(&socket, &request).map_err(|error| format!("herdr didn't answer: {error}"))?;
+    let reply: Value = serde_json::from_str(&reply).unwrap_or_default();
+    if let Some(error) = reply.get("error") {
+        return Err(format!("herdr refused the send: {error}"));
+    }
+    call(&["agent", "focus", pane]).map(drop)
+}
+
+/// Write `request` as one line to herdr's socket and read the one line it answers.
+fn exchange(socket: &str, request: &str) -> std::io::Result<String> {
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(SEND_TIMEOUT))?;
+    stream.set_write_timeout(Some(SEND_TIMEOUT))?;
+    stream.write_all(format!("{request}\n").as_bytes())?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply)?;
+    Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agents_are_the_workspace_s_agent_panes_but_this_one() {
+        let list = serde_json::json!({"agents": [
+            {"agent": "claude", "agent_status": "working", "pane_id": "p1", "tab_id": "t1",
+             "workspace_id": "w1", "name": "fixer", "state_labels": {"working": "busy"}},
+            {"agent": "codex", "agent_status": "idle", "pane_id": "p2", "tab_id": "t2",
+             "workspace_id": "w1", "display_agent": "", "name": null},
+            {"agent": "claude", "agent_status": "idle", "pane_id": "me", "tab_id": "t1",
+             "workspace_id": "w1"},
+            {"agent": "", "agent_status": "idle", "pane_id": "shell", "tab_id": "t1",
+             "workspace_id": "w1"},
+            {"agent": "claude", "agent_status": "idle", "pane_id": "far", "tab_id": "t9",
+             "workspace_id": "w2"},
+        ]});
+        let tabs = HashMap::from([("t1", "main")]);
+        let agent = |pane: &str, name: &str, state: &str, tab: &str| Agent {
+            pane: pane.into(),
+            name: name.into(),
+            state: state.into(),
+            tab: tab.into(),
+        };
+        assert_eq!(
+            agents_in(&list, "w1", Some("me"), &tabs),
+            [agent("p1", "fixer", "busy", "main"), agent("p2", "codex", "idle", "")]
+        );
+    }
 }
