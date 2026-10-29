@@ -1,6 +1,7 @@
 mod app;
 mod doc;
 mod markdown;
+mod picker;
 mod ui;
 
 use std::path::PathBuf;

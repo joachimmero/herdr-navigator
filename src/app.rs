@@ -12,26 +12,30 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 
 use crate::doc::Doc;
+use crate::picker::Picker;
 use crate::ui;
 
 pub enum Screen {
-    Empty,
+    Picker,
     Doc(Doc),
 }
 
 pub struct App {
     pub screen: Screen,
+    pub picker: Picker,
     quit: bool,
 }
 
 const TICK: Duration = Duration::from_millis(100);
 const WHEEL_LINES: isize = 3;
 
-/// Run the pane, showing `file` first when given, and return the process exit code.
+/// Run the pane, showing `file` first when given and the picker otherwise, and return the
+/// process exit code.
 pub fn run(file: Option<PathBuf>) -> u8 {
+    let cwd = std::env::current_dir().unwrap_or_default();
     let mut terminal = ratatui::init();
     let _ = execute!(io::stdout(), EnableMouseCapture);
-    let outcome = App::new(file).run(&mut terminal);
+    let outcome = App::new(Picker::new(&cwd), file).run(&mut terminal);
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     match outcome {
@@ -44,28 +48,48 @@ pub fn run(file: Option<PathBuf>) -> u8 {
 }
 
 fn is_quit(key: &KeyEvent) -> bool {
-    key.code == KeyCode::Char('q')
-        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn half_page_direction(key: &KeyEvent) -> Option<isize> {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('d') => Some(1),
+        KeyCode::Char('u') => Some(-1),
+        _ => None,
+    }
 }
 
 impl App {
-    fn new(file: Option<PathBuf>) -> Self {
-        let screen = file.map_or(Screen::Empty, |file| Screen::Doc(Doc::open(file)));
-        Self { screen, quit: false }
+    fn new(picker: Picker, file: Option<PathBuf>) -> Self {
+        let mut app = Self { screen: Screen::Picker, picker, quit: false };
+        match file {
+            Some(file) => app.screen = Screen::Doc(Doc::open(file)),
+            None => app.show_picker(),
+        }
+        app
     }
 
     fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.quit {
-            if let Screen::Doc(doc) = &mut self.screen {
-                doc.refresh();
+            match &mut self.screen {
+                Screen::Picker => self.picker.poll(),
+                Screen::Doc(doc) => doc.refresh(),
             }
             let size = terminal.size()?;
-            terminal.draw(|frame| ui::draw(frame, &mut self.screen))?;
+            terminal.draw(|frame| ui::draw(frame, &mut self))?;
             if event::poll(TICK)? {
                 self.on_event(event::read()?, ui::page_height(size.height));
             }
         }
         Ok(())
+    }
+
+    fn show_picker(&mut self) {
+        self.picker.rescan();
+        self.screen = Screen::Picker;
     }
 
     fn on_event(&mut self, event: Event, page: usize) {
@@ -77,8 +101,9 @@ impl App {
                     MouseEventKind::ScrollUp => -WHEEL_LINES,
                     _ => return,
                 };
-                if let Screen::Doc(doc) = &mut self.screen {
-                    doc.scroll_by(delta, page);
+                match &mut self.screen {
+                    Screen::Picker => self.picker.move_by(delta),
+                    Screen::Doc(doc) => doc.scroll_by(delta, page),
                 }
             }
             _ => {}
@@ -90,20 +115,70 @@ impl App {
             self.quit = true;
             return;
         }
-        if let Screen::Doc(doc) = &mut self.screen {
-            on_doc_key(doc, key, page);
+        match &mut self.screen {
+            Screen::Picker if self.picker.editing_filter => self.on_filter_key(key),
+            Screen::Picker => self.on_picker_key(key, page),
+            Screen::Doc(doc) => match key.code {
+                KeyCode::Char('q') => self.quit = true,
+                KeyCode::Esc | KeyCode::Char('o') => self.show_picker(),
+                _ => on_doc_key(doc, key, page),
+            },
+        }
+    }
+
+    fn on_picker_key(&mut self, key: KeyEvent, page: usize) {
+        let picker = &mut self.picker;
+        if let Some(direction) = half_page_direction(&key) {
+            picker.move_by(direction * (page / 2).max(1) as isize);
+            return;
+        }
+        match key.code {
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('j') | KeyCode::Down => picker.move_by(1),
+            KeyCode::Char('k') | KeyCode::Up => picker.move_by(-1),
+            KeyCode::Char('g') | KeyCode::Home => picker.selected = 0,
+            KeyCode::Char('G') | KeyCode::End => picker.move_by(isize::MAX),
+            KeyCode::Char('/') => picker.editing_filter = true,
+            KeyCode::Char('r') => picker.rescan(),
+            KeyCode::Enter => {
+                if let Some(file) = picker.selected_file() {
+                    self.screen = Screen::Doc(Doc::open(picker.root.join(file)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_filter_key(&mut self, key: KeyEvent) {
+        let picker = &mut self.picker;
+        match key.code {
+            KeyCode::Esc => {
+                picker.set_filter(String::new());
+                picker.editing_filter = false;
+            }
+            KeyCode::Enter => picker.editing_filter = false,
+            KeyCode::Backspace if picker.filter.is_empty() => picker.editing_filter = false,
+            KeyCode::Backspace => {
+                let mut filter = picker.filter.clone();
+                filter.pop();
+                picker.set_filter(filter);
+            }
+            KeyCode::Down => picker.move_by(1),
+            KeyCode::Up => picker.move_by(-1),
+            KeyCode::Char(ch) => picker.set_filter(format!("{}{ch}", picker.filter)),
+            _ => {}
         }
     }
 }
 
 fn on_doc_key(doc: &mut Doc, key: KeyEvent, page: usize) {
-    let half = (page / 2).max(1) as isize;
-    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    if let Some(direction) = half_page_direction(&key) {
+        doc.scroll_by(direction * (page / 2).max(1) as isize, page);
+        return;
+    }
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => doc.scroll_by(1, page),
         KeyCode::Char('k') | KeyCode::Up => doc.scroll_by(-1, page),
-        KeyCode::Char('d') if control => doc.scroll_by(half, page),
-        KeyCode::Char('u') if control => doc.scroll_by(-half, page),
         KeyCode::PageDown | KeyCode::Char(' ') => doc.scroll_by(page as isize, page),
         KeyCode::PageUp => doc.scroll_by(-(page as isize), page),
         KeyCode::Char('g') | KeyCode::Home => doc.scroll = 0,
