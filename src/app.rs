@@ -9,8 +9,10 @@ use std::time::Duration;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
+use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 
@@ -75,7 +77,17 @@ pub fn run(location: Option<Location>) -> u8 {
     }
     let mut terminal = ratatui::init();
     let _ = execute!(io::stdout(), EnableMouseCapture);
+    // Where the terminal can, have it tell keys apart that it otherwise sends alike, like `Tab`
+    // and `Ctrl+i`, or `Enter` and `Shift+Enter`.
+    let enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    if enhanced {
+        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
+        let _ = execute!(io::stdout(), PushKeyboardEnhancementFlags(flags));
+    }
     let outcome = App::new(Tree::new(&cwd), inbox, location).run(&mut terminal);
+    if enhanced {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     match outcome {
