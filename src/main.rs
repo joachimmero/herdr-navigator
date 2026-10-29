@@ -8,6 +8,7 @@ mod doc;
 mod herdr;
 mod highlight;
 mod inbox;
+mod jumps;
 mod layout;
 mod location;
 mod markdown;

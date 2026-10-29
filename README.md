@@ -70,6 +70,7 @@ In a file:
 | `c` | Comment on the selection, or the cursor's line |
 | `e` `d` | Edit, delete the comment at the cursor |
 | `n` `N` | Go to the next, previous comment, in any file |
+| `Ctrl+o` `Ctrl+i` | Go back to where a jump left from, forward again |
 | `l` | List every comment |
 | `s` | Send every comment to an agent |
 | `y` | Copy every comment |
@@ -88,11 +89,16 @@ In the tree:
 | `h` `←` | Close the folder, or go to the one holding the entry |
 | `i` | Show or hide what git ignores |
 | `Tab` | Go to the file |
+| `Ctrl+o` `Ctrl+i` | Go back to where a jump left from, forward again |
 | `r` | Look for files again |
 | `q` | Close the pane |
 
 The cursor and the selection are marked in the margin, and the title bar shows the source lines
 they cover, so in rendered markdown you can see which lines of the file a paragraph came from.
+
+Pointing from the command line, `n` `N`, and `⏎` in the comment list are jumps: `Ctrl+o` goes back
+to where each one left from, like vim's jumplist. `Ctrl+i` needs a terminal that tells it apart
+from `Tab`; inside tmux it arrives as `Tab`.
 
 ## Comments
 

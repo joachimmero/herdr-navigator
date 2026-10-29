@@ -12,8 +12,8 @@ use ratatui::crossterm::event::{
     KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::layout::{Position, Rect};
 
 use crate::comment::{self, Comment, Comments};
@@ -21,6 +21,7 @@ use crate::composer::{Composer, Target};
 use crate::doc::Doc;
 use crate::herdr::{self, Agent};
 use crate::inbox::Inbox;
+use crate::jumps::{Jumps, Place};
 use crate::location::Location;
 use crate::tree::Tree;
 use crate::ui::{self, Panes};
@@ -56,6 +57,7 @@ pub struct App {
     pub notice: Option<String>,
     /// A place pointed at while a comment was being written, which `⏎` goes to once it's done.
     pub pending: Option<Location>,
+    jumps: Jumps,
     /// The pane the comments last went to, which the picker opens on.
     last_sent: Option<String>,
     /// Where `herdr-navigator <file>` posts files for this pane; `None` outside herdr.
@@ -125,6 +127,7 @@ impl App {
             mode: Mode::Browse,
             notice: None,
             pending: None,
+            jumps: Jumps::default(),
             last_sent: None,
             inbox,
             quit: false,
@@ -162,6 +165,7 @@ impl App {
     /// Show `location`'s file, with its lines marked when it names some.
     fn go(&mut self, location: Location) {
         self.mode = Mode::Browse;
+        self.remember();
         self.show(location.file);
         if let (Some(doc), Some(lines)) = (&mut self.doc, location.lines) {
             doc.point(lines);
@@ -261,7 +265,19 @@ impl App {
             }
             Mode::Browse => {}
         }
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            KeyCode::Char('o') if control => {
+                let back = self.here().and_then(|here| self.jumps.back(here));
+                if let Some(place) = back {
+                    self.visit(place);
+                }
+            }
+            KeyCode::Char('i') if control => {
+                if let Some(place) = self.jumps.forward() {
+                    self.visit(place);
+                }
+            }
             KeyCode::Enter if self.pending.is_some() => {
                 let pending = self.pending.take().expect("checked just above");
                 self.go(pending);
@@ -354,12 +370,29 @@ impl App {
         }
     }
 
-    /// Show `file` with the cursor on `line`.
+    /// Show `file` with the cursor on `line`, remembering where it was.
     fn jump(&mut self, file: PathBuf, line: usize) {
+        self.remember();
+        self.visit((file, line));
+    }
+
+    fn visit(&mut self, (file, line): Place) {
         self.show(file);
         if let Some(doc) = &mut self.doc {
             doc.go_to_line(line);
         }
+    }
+
+    /// Remember where the cursor is before jumping away, for `Ctrl+o` to come back to.
+    fn remember(&mut self) {
+        if let Some(here) = self.here() {
+            self.jumps.record(here);
+        }
+    }
+
+    fn here(&self) -> Option<Place> {
+        let doc = self.doc.as_ref()?;
+        Some((doc.path.clone(), doc.cursor_line()?))
     }
 
     /// Send every comment to the workspace's one agent, or let a picker choose among several.
