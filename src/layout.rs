@@ -1,6 +1,9 @@
 //! A file laid out for the pane: rows on screen, each knowing the source lines it shows.
 
-use ratatui::text::Line;
+use std::ops::Range;
+
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
 /// A run of 1-based source lines, both ends inclusive.
@@ -38,6 +41,49 @@ pub struct Row {
     /// How many of the line's spans lead it without being the file's text, like a line number
     /// or a bullet.
     pub chrome: usize,
+}
+
+/// The text of `line` past its first `chrome` spans.
+pub fn text(line: &Line, chrome: usize) -> String {
+    line.spans.iter().skip(chrome).map(|span| &*span.content).collect()
+}
+
+/// `line` with `style` patched onto the byte ranges `marked` of its text past the first `chrome`
+/// spans, splitting spans where a range starts or ends inside one.
+pub fn mark(
+    line: Line<'static>,
+    chrome: usize,
+    marked: &[Range<usize>],
+    style: Style,
+) -> Line<'static> {
+    if marked.is_empty() {
+        return line;
+    }
+    let mut end = 0;
+    let spans = line
+        .spans
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, span)| {
+            if index < chrome {
+                return vec![span];
+            }
+            let start = end;
+            end += span.content.len();
+            let inside = marked.iter().flat_map(|range| [range.start, range.end]);
+            let mut cuts: Vec<usize> = inside.filter(|&cut| start < cut && cut < end).collect();
+            cuts.extend([start, end]);
+            cuts.sort_unstable();
+            cuts.windows(2)
+                .map(|piece| {
+                    let text = span.content[piece[0] - start..piece[1] - start].to_owned();
+                    let hit = marked.iter().any(|range| range.contains(&piece[0]));
+                    Span::styled(text, if hit { span.style.patch(style) } else { span.style })
+                })
+                .collect()
+        })
+        .collect();
+    Line { spans, ..line }
 }
 
 /// `text` cut into pieces at most `width` columns wide, keeping an empty line as one piece.

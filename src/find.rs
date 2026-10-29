@@ -3,7 +3,9 @@
 use std::ops::Range;
 
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
+
+use crate::layout;
 
 const MATCH: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
 
@@ -36,46 +38,16 @@ pub fn ranges(text: &str, query: &str) -> Vec<Range<usize>> {
     found
 }
 
-/// The text of `line` past its first `chrome` spans.
-pub fn text(line: &Line, chrome: usize) -> String {
-    line.spans.iter().skip(chrome).map(|span| &*span.content).collect()
-}
-
 /// `line` with `query` marked wherever it is found past the first `chrome` spans.
 pub fn highlight(line: Line<'static>, chrome: usize, query: &str) -> Line<'static> {
-    let found = ranges(&text(&line, chrome), query);
-    if found.is_empty() {
-        return line;
-    }
-    let mut end = 0;
-    let spans = line
-        .spans
-        .into_iter()
-        .enumerate()
-        .flat_map(|(index, span)| {
-            if index < chrome {
-                return vec![span];
-            }
-            let start = end;
-            end += span.content.len();
-            let inside = found.iter().flat_map(|range| [range.start, range.end]);
-            let mut cuts: Vec<usize> = inside.filter(|&cut| start < cut && cut < end).collect();
-            cuts.extend([start, end]);
-            cuts.sort_unstable();
-            cuts.windows(2)
-                .map(|piece| {
-                    let text = span.content[piece[0] - start..piece[1] - start].to_owned();
-                    let hit = found.iter().any(|range| range.contains(&piece[0]));
-                    Span::styled(text, if hit { span.style.patch(MATCH) } else { span.style })
-                })
-                .collect()
-        })
-        .collect();
-    Line { spans, ..line }
+    let found = ranges(&layout::text(&line, chrome), query);
+    layout::mark(line, chrome, &found, MATCH)
 }
 
 #[cfg(test)]
 mod tests {
+    use ratatui::text::Span;
+
     use super::*;
 
     #[test]

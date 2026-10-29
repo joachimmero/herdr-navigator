@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::comment::{self, Comments};
-use crate::layout::{Lines, Row};
+use crate::layout::{self, Lines, Row};
 use crate::{code, find, highlight, markdown};
 
 /// What a file looked like on disk the last time it was read.
@@ -313,7 +313,7 @@ impl Doc {
     /// The rows of the file, cards aside, whose text holds `query`.
     fn found_rows(&self, query: &str) -> Vec<usize> {
         let holds = |index: &usize| {
-            let text = self.chrome(*index).map(|chrome| find::text(self.line(*index), chrome));
+            let text = self.chrome(*index).map(|chrome| layout::text(self.line(*index), chrome));
             text.is_some_and(|text| !find::ranges(&text, query).is_empty())
         };
         (0..self.shown.len()).filter(holds).collect()
