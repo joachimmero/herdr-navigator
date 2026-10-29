@@ -22,7 +22,7 @@ pub fn layout(lines: &[Vec<Span<'static>>], width: u16) -> Vec<Row> {
                     if row == 0 { format!("{:>digits$} ", index + 1) } else { " ".repeat(gutter) };
                 let number = Span::styled(number, Style::new().add_modifier(Modifier::DIM));
                 let line = Line::from([vec![number], spans].concat());
-                Row { line, source: Some(Lines::one(index + 1)) }
+                Row { line, source: Some(Lines::one(index + 1)), chrome: 1 }
             })
         })
         .collect()

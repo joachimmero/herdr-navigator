@@ -13,6 +13,8 @@ use crate::app::{App, Focus, Mode};
 use crate::comment::{self, Comments};
 use crate::composer::{Composer, Target};
 use crate::doc::Doc;
+use crate::field::Field;
+use crate::find;
 use crate::herdr::Agent;
 use crate::layout::Lines;
 use crate::search::{CodeHit, Kind, Phase, ResultRow, Search};
@@ -29,6 +31,8 @@ pub struct Panes {
     pub title: Rect,
     pub tree: Option<Rect>,
     pub file: Option<Rect>,
+    /// The find band under the file while finding.
+    pub find: Option<Rect>,
     pub search: Option<SearchPanes>,
 }
 
@@ -54,7 +58,7 @@ pub fn panes(area: Rect, app: &App) -> Panes {
     let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
     if let Mode::Search(search) = &app.mode {
         let search = Some(search_panes(body, search));
-        return Panes { title, tree: None, file: None, search };
+        return Panes { title, tree: None, file: None, find: None, search };
     }
     let (tree, file) = match (&app.doc, app.focus) {
         (None, _) => (Some(body), None),
@@ -73,7 +77,15 @@ pub fn panes(area: Rect, app: &App) -> Panes {
             (Some(tree), Some(inset(file)))
         }
     };
-    Panes { title, tree, file, search: None }
+    let (file, find) = match (file, &app.mode) {
+        (Some(file), Mode::Find(_)) => {
+            let [file, find] =
+                Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(file);
+            (Some(file), Some(find))
+        }
+        _ => (file, None),
+    };
+    Panes { title, tree, file, find, search: None }
 }
 
 fn search_panes(body: Rect, search: &Search) -> SearchPanes {
@@ -124,12 +136,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         (Mode::List { selected }, Some(area)) => draw_list(frame, app, *selected, area),
         _ => {
             if let (Some(area), Some(doc)) = (panes.file, &mut app.doc) {
-                let composer = match &app.mode {
-                    Mode::Composing(composer) => Some(composer),
-                    _ => None,
+                let (composer, find) = match &app.mode {
+                    Mode::Composing(composer) => (Some(composer), None),
+                    Mode::Find(field) => (None, Some(field)),
+                    _ => (None, None),
                 };
                 let focused = app.focus == Focus::File;
-                status = draw_doc(frame, doc, &app.comments, composer, area, focused);
+                let query = find.map(|field| &*field.text);
+                status = draw_doc(frame, doc, &app.comments, composer, query, area, focused);
+                if let (Some(field), Some(band)) = (find, panes.find) {
+                    draw_find(frame, field, doc, band);
+                }
             }
         }
     }
@@ -208,12 +225,22 @@ fn draw_doc(
     doc: &mut Doc,
     comments: &Comments,
     composer: Option<&Composer>,
+    find: Option<&str>,
     area: Rect,
     focused: bool,
 ) -> Vec<Span<'static>> {
     let height = usize::from(area.height);
     let box_height = composer.map_or(0, |composer| composer_height(composer, area));
-    let lines = doc.page(area.width, height, comments, usize::from(box_height));
+    let mut lines = doc.page(area.width, height, comments, usize::from(box_height));
+    if let Some(query) = find {
+        lines = (doc.scroll..)
+            .zip(lines)
+            .map(|(index, line)| match doc.chrome(index) {
+                Some(chrome) => find::highlight(line, chrome, query),
+                None => line,
+            })
+            .collect();
+    }
     let shown = lines.len();
     frame.render_widget(Paragraph::new(lines), area);
     if let Some(composer) = composer {
@@ -368,6 +395,26 @@ fn draw_picker(frame: &mut Frame, agents: &[Agent], selected: usize, area: Rect)
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+/// The find band: what is being found, and which of the rows it is on the cursor is on.
+fn draw_find(frame: &mut Frame, field: &Field, doc: &Doc, area: Rect) {
+    let label = Span::styled("find ", dim());
+    let query = match field.text.is_empty() {
+        true => Span::styled("Find in file…", dim()),
+        false => Span::raw(field.text.clone()),
+    };
+    let count = match doc.found(&field.text) {
+        _ if field.text.is_empty() => String::new(),
+        (_, 0) => "no matches".into(),
+        (Some(here), total) => format!("{here}/{total}"),
+        (None, total) => total.to_string(),
+    };
+    let column = field.rows(usize::MAX).1.1;
+    let caret = u16::try_from(label.width() + column).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(Line::from(vec![label, query])), area);
+    frame.render_widget(Paragraph::new(Line::styled(count, dim()).right_aligned()), area);
+    frame.set_cursor_position((area.x + caret.min(area.width.saturating_sub(1)), area.y));
+}
+
 fn draw_search(
     frame: &mut Frame,
     search: &mut Search,
@@ -420,7 +467,7 @@ fn draw_search(
     );
     match &mut search.preview {
         Some(doc) => {
-            draw_doc(frame, doc, comments, None, screen.preview, false);
+            draw_doc(frame, doc, comments, None, None, screen.preview, false);
         }
         None => {
             frame.render_widget(Paragraph::new(Line::styled("no preview", dim())), screen.preview)

@@ -35,6 +35,9 @@ pub struct Row {
     pub line: Line<'static>,
     /// `None` for a row no source line feeds, like the gap between two blocks.
     pub source: Option<Lines>,
+    /// How many of the line's spans lead it without being the file's text, like a line number
+    /// or a bullet.
+    pub chrome: usize,
 }
 
 /// `text` cut into pieces at most `width` columns wide, keeping an empty line as one piece.

@@ -49,6 +49,8 @@ pub enum Mode {
         selected: usize,
     },
     Search(Box<Search>),
+    /// Finding text in the file.
+    Find(Field),
 }
 
 pub struct App {
@@ -283,6 +285,7 @@ impl App {
         match &mut self.mode {
             Mode::Picker { .. } => return self.on_picker_key(key),
             Mode::Search(_) => return self.on_search_key(key, panes),
+            Mode::Find(_) => return self.on_find_key(key),
             Mode::Composing(composer) => {
                 if on_composer_key(&mut composer.field, key) {
                     self.finish_composing(key.code == KeyCode::Enter);
@@ -306,6 +309,13 @@ impl App {
             KeyCode::Char('i') if control => {
                 if let Some(place) = self.jumps.forward() {
                     self.visit(place);
+                }
+            }
+            KeyCode::Char('f') if control => {
+                if let Some(doc) = &mut self.doc {
+                    doc.clear_selection();
+                    self.focus = Focus::File;
+                    self.mode = Mode::Find(Field::new(String::new()));
                 }
             }
             KeyCode::Enter if self.pending.is_some() => {
@@ -542,6 +552,22 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc | KeyCode::Char('l') => self.mode = Mode::Browse,
             _ => {}
+        }
+    }
+
+    fn on_find_key(&mut self, key: KeyEvent) {
+        let (Mode::Find(field), Some(doc)) = (&mut self.mode, &mut self.doc) else { return };
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Browse,
+            KeyCode::Enter | KeyCode::Down => doc.find(&field.text, 1),
+            KeyCode::Up => doc.find(&field.text, -1),
+            _ => {
+                let before = field.text.clone();
+                on_field_key(field, key);
+                if field.text != before {
+                    doc.find(&field.text, 0);
+                }
+            }
         }
     }
 

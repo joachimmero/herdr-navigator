@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 
 use crate::comment::{self, Comments};
 use crate::layout::{Lines, Row};
-use crate::{code, highlight, markdown};
+use crate::{code, find, highlight, markdown};
 
 /// What a file looked like on disk the last time it was read.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -124,6 +124,7 @@ impl Doc {
                         Style::new().add_modifier(Modifier::DIM),
                     ),
                     source: None,
+                    chrome: 1,
                 }],
             };
             self.width = width;
@@ -283,6 +284,47 @@ impl Doc {
         let lines = self.source(self.cursor)?;
         let on_lines = |(_, comment): &(u64, &comment::Comment)| comment.lines.overlaps(lines);
         comments.in_file(&self.path).into_iter().find(on_lines).map(|(id, _)| id)
+    }
+
+    /// Move the cursor to a row `query` is found on, wrapping around: for `step` 1 the next after
+    /// it, for -1 the one before, and for 0 its own row when found there.
+    pub fn find(&mut self, query: &str, step: isize) {
+        let found = self.found_rows(query);
+        let after = found.partition_point(|&row| row < self.cursor);
+        let on = found.get(after) == Some(&self.cursor);
+        let target = match step {
+            0 => after,
+            1.. => after + usize::from(on),
+            _ => after + found.len().saturating_sub(1),
+        };
+        if let Some(&row) = found.get(target.checked_rem(found.len()).unwrap_or(0)) {
+            self.cursor = row;
+        }
+    }
+
+    /// Which of the rows `query` is found on the cursor is on, counting from 1, and how many there
+    /// are.
+    pub fn found(&self, query: &str) -> (Option<usize>, usize) {
+        let found = self.found_rows(query);
+        let here = found.iter().position(|&row| row == self.cursor);
+        (here.map(|index| index + 1), found.len())
+    }
+
+    /// The rows of the file, cards aside, whose text holds `query`.
+    fn found_rows(&self, query: &str) -> Vec<usize> {
+        let holds = |index: &usize| {
+            let text = self.chrome(*index).map(|chrome| find::text(self.line(*index), chrome));
+            text.is_some_and(|text| !find::ranges(&text, query).is_empty())
+        };
+        (0..self.shown.len()).filter(holds).collect()
+    }
+
+    /// How many spans lead row `index` without being the file's text; `None` for a card's row.
+    pub fn chrome(&self, index: usize) -> Option<usize> {
+        match self.shown.get(index)? {
+            Shown::Source(row) => Some(self.rows[*row].chrome),
+            Shown::Card { .. } => None,
+        }
     }
 
     fn selected_rows(&self) -> RangeInclusive<usize> {

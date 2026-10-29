@@ -73,6 +73,7 @@ In a file:
 | `n` `N` | Go to the next, previous comment, in any file |
 | `Ctrl+o` `Ctrl+i` | Go back to where a jump left from, forward again |
 | `/` | Search the project |
+| `Ctrl+f` | Find text in the file |
 | `l` | List every comment |
 | `s` | Send every comment to an agent |
 | `y` | Copy every comment |
@@ -92,6 +93,7 @@ In the tree:
 | `i` | Show or hide what git ignores |
 | `Tab` | Go to the file |
 | `/` | Search the project |
+| `Ctrl+f` | Find text in the file |
 | `Ctrl+o` `Ctrl+i` | Go back to where a jump left from, forward again |
 | `r` | Look for files again |
 | `q` | Close the pane |
@@ -102,6 +104,13 @@ they cover, so in rendered markdown you can see which lines of the file a paragr
 Pointing from the command line, `n` `N`, opening a search result, and `⏎` in the comment list
 are jumps: `Ctrl+o` goes back to where each one left from, like vim's jumplist. `Ctrl+i` needs a
 terminal that tells it apart from `Tab`; inside tmux it arrives as `Tab`.
+
+## Find in file
+
+`Ctrl+f` opens a band under the file and moves the cursor to the text as you type, marking each
+place it's found. Case matters only when what you type holds a capital. `⏎` or `↓` go to the next
+place, `↑` to the previous, and `Esc` closes the band, leaving the cursor where it is. Comment
+cards aren't searched, and text broken across a wrapped line isn't found.
 
 ## Search
 
