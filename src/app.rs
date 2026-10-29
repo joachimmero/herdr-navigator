@@ -336,7 +336,7 @@ impl App {
             KeyCode::Char('N') => self.next_comment(false),
             KeyCode::Char('s') => self.send(),
             KeyCode::Char('y') => self.copy(),
-            KeyCode::Char('/') => self.open_search(),
+            KeyCode::Char('/') => self.open_find(),
             _ => match (self.focus, &mut self.doc) {
                 (Focus::File, Some(doc)) => match key.code {
                     KeyCode::Esc if doc.clear_selection() => {}
@@ -381,13 +381,7 @@ impl App {
                         self.visit(place);
                     }
                 }
-                KeyCode::Char('f') => {
-                    if let Some(doc) = &mut self.doc {
-                        doc.clear_selection();
-                        self.focus = Focus::File;
-                        self.mode = Mode::Find(Field::new(String::new()));
-                    }
-                }
+                KeyCode::Char('f') => self.open_search(),
                 KeyCode::Char('d') => self.move_half_page(1, panes.page()),
                 KeyCode::Char('u') => self.move_half_page(-1, panes.page()),
                 _ => {}
@@ -613,6 +607,14 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc | KeyCode::Char('l') => self.mode = Mode::Browse,
             _ => {}
+        }
+    }
+
+    fn open_find(&mut self) {
+        if let Some(doc) = &mut self.doc {
+            doc.clear_selection();
+            self.focus = Focus::File;
+            self.mode = Mode::Find(Field::new(String::new()));
         }
     }
 

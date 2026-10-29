@@ -74,8 +74,8 @@ In a file:
 | `e` `d` | Edit, delete the comment at the cursor |
 | `n` `N` | Go to the next, previous comment, in any file |
 | `Ctrl+o` `Ctrl+i` | Go back to where a jump left from, forward again |
-| `/` | Search the project |
-| `Ctrl+f` | Find text in the file |
+| `/` | Find text in the file |
+| `Ctrl+f` | Search the project |
 | `m` | Show markdown as its source, or rendered again |
 | `l` | List every comment |
 | `s` | Send every comment to an agent |
@@ -95,8 +95,8 @@ In the tree:
 | `h` `←` | Close the folder, or go to the one holding the entry |
 | `i` | Show or hide what git ignores |
 | `Tab` | Go to the file |
-| `/` | Search the project |
-| `Ctrl+f` | Find text in the file |
+| `/` | Find text in the file |
+| `Ctrl+f` | Search the project |
 | `m` | Show markdown as its source, or rendered again |
 | `Ctrl+o` `Ctrl+i` | Go back to where a jump left from, forward again |
 | `r` | Look for files again |
@@ -115,14 +115,14 @@ terminal that tells it apart from `Tab`; inside tmux it arrives as `Tab`.
 
 ## Find in file
 
-`Ctrl+f` opens a band under the file and moves the cursor to the text as you type, marking each
+`/` opens a band under the file and moves the cursor to the text as you type, marking each
 place it's found. Case matters only when what you type holds a capital. `⏎` or `↓` go to the next
 place, `↑` to the previous, and `Esc` closes the band, leaving the cursor where it is. Comment
 cards aren't searched, and text broken across a wrapped line isn't found.
 
 ## Search
 
-`/` searches the project's file paths and their contents as you type, with
+`Ctrl+f` searches the project's file paths and their contents as you type, with
 [fff](https://github.com/dmtrKovalenko/fff.nvim)'s engine. The list shows the files that match,
 and `Tab` or a click on the chips switches it to the lines that match, grouped by file. The
 picked result shows in a preview below the list, a matching line in the middle of it.
