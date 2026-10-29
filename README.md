@@ -57,11 +57,14 @@ In a file:
 
 | Key | Does |
 | --- | --- |
-| `j` `k` / `↓` `↑`, mouse wheel | Scroll |
-| `Ctrl+d` `Ctrl+u` | Scroll half a page down, up |
-| `space` / `PgDn`, `PgUp` | Scroll a page down, up |
+| `j` `k` / `↓` `↑`, click | Move the cursor |
+| mouse wheel | Scroll, taking the cursor along |
+| `Ctrl+d` `Ctrl+u` | Move half a page down, up |
+| `space` / `PgDn`, `PgUp` | Move a page down, up |
 | `g` `G` / `Home` `End` | Go to the top, the bottom |
-| `Tab` `Esc` | Go to the tree |
+| `v` | Start selecting lines at the cursor, or stop |
+| `Esc` | Drop the selection, or go to the tree |
+| `Tab` | Go to the tree |
 | `q` | Close the pane |
 
 In the tree:
@@ -77,6 +80,9 @@ In the tree:
 | `Tab` | Go to the file |
 | `r` | Look for files again |
 | `q` | Close the pane |
+
+The cursor and the selection are marked in the margin, and the title bar shows the source lines
+they cover, so in rendered markdown you can see which lines of the file a paragraph came from.
 
 ## The tree
 

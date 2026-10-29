@@ -135,9 +135,18 @@ impl App {
     fn on_mouse(&mut self, mouse: MouseEvent, panes: &Panes) {
         let at = Position::new(mouse.column, mouse.row);
         let in_tree = panes.tree.is_some_and(|tree| tree.contains(at));
+        let in_file = panes.file.is_some_and(|file| file.contains(at));
         let delta = match mouse.kind {
             MouseEventKind::ScrollDown => WHEEL_LINES,
             MouseEventKind::ScrollUp => -WHEEL_LINES,
+            MouseEventKind::Down(MouseButton::Left) if in_file => {
+                let file = panes.file.expect("the click landed in it");
+                if let Some(doc) = &mut self.doc {
+                    doc.click(usize::from(at.y - file.y), panes.page());
+                    self.focus = Focus::File;
+                }
+                return;
+            }
             MouseEventKind::Down(MouseButton::Left) if in_tree => {
                 let tree = panes.tree.expect("the click landed in it");
                 let row = usize::from(at.y - tree.y) + self.tree.offset.get();
@@ -169,6 +178,7 @@ impl App {
         }
         match (self.focus, &mut self.doc) {
             (Focus::File, Some(doc)) => match key.code {
+                KeyCode::Esc if doc.clear_selection() => {}
                 KeyCode::Tab | KeyCode::Esc => self.focus = Focus::Tree,
                 _ => on_doc_key(doc, key, panes.page()),
             },
@@ -205,16 +215,17 @@ impl App {
 
 fn on_doc_key(doc: &mut Doc, key: KeyEvent, page: usize) {
     if let Some(direction) = half_page_direction(&key) {
-        doc.scroll_by(direction * (page / 2).max(1) as isize, page);
+        doc.page_by(direction * (page / 2).max(1) as isize, page);
         return;
     }
     match key.code {
-        KeyCode::Char('j') | KeyCode::Down => doc.scroll_by(1, page),
-        KeyCode::Char('k') | KeyCode::Up => doc.scroll_by(-1, page),
-        KeyCode::PageDown | KeyCode::Char(' ') => doc.scroll_by(page as isize, page),
-        KeyCode::PageUp => doc.scroll_by(-(page as isize), page),
-        KeyCode::Char('g') | KeyCode::Home => doc.scroll = 0,
-        KeyCode::Char('G') | KeyCode::End => doc.scroll_to_end(page),
+        KeyCode::Char('j') | KeyCode::Down => doc.move_cursor(1, page),
+        KeyCode::Char('k') | KeyCode::Up => doc.move_cursor(-1, page),
+        KeyCode::PageDown | KeyCode::Char(' ') => doc.page_by(page as isize, page),
+        KeyCode::PageUp => doc.page_by(-(page as isize), page),
+        KeyCode::Char('g') | KeyCode::Home => doc.move_cursor(isize::MIN, page),
+        KeyCode::Char('G') | KeyCode::End => doc.move_cursor(isize::MAX, page),
+        KeyCode::Char('v') => doc.toggle_selection(),
         _ => {}
     }
 }

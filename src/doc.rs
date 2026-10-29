@@ -1,12 +1,14 @@
 //! The file the pane shows, kept in step with the disk.
 
 use std::fs;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::layout::{Lines, Row};
 use crate::{code, highlight, markdown};
 
 /// What a file looked like on disk the last time it was read.
@@ -29,10 +31,14 @@ pub struct Doc {
     content: Content,
     /// `None` while the file is missing, in which case `source` is what it last held.
     stamp: Option<Stamp>,
-    /// The width `lines` were laid out for.
+    /// The width `rows` were laid out for.
     width: u16,
-    lines: Vec<Line<'static>>,
+    rows: Vec<Row>,
     pub scroll: usize,
+    /// The row the cursor is on.
+    cursor: usize,
+    /// The row a selection started on, while there is one.
+    anchor: Option<usize>,
 }
 
 impl Doc {
@@ -42,8 +48,10 @@ impl Doc {
             content: Content::Code(Vec::new()),
             stamp: None,
             width: 0,
-            lines: Vec::new(),
+            rows: Vec::new(),
             scroll: 0,
+            cursor: 0,
+            anchor: None,
         };
         doc.refresh();
         doc
@@ -69,48 +77,137 @@ impl Doc {
         }
     }
 
-    /// The document laid out for `width` columns.
-    pub fn lines(&mut self, width: u16) -> &[Line<'static>] {
+    /// The document laid out for `width` columns, the cursor and selection kept on the source
+    /// lines they were on.
+    pub fn rows(&mut self, width: u16) -> &[Row] {
         if width != self.width {
-            self.lines = match &self.content {
+            let cursor_line = self.source_line(self.cursor);
+            let anchor_line = self.anchor.and_then(|anchor| self.source_line(anchor));
+            let cursor_on_screen = self.cursor.saturating_sub(self.scroll);
+            self.rows = match &self.content {
                 Content::Markdown(source) => markdown::render(source, width),
                 Content::Code(lines) => code::layout(lines, width),
-                Content::Binary => vec![Line::styled(
-                    "Binary file, not shown.",
-                    Style::new().add_modifier(Modifier::DIM),
-                )],
+                Content::Binary => vec![Row {
+                    line: Line::styled(
+                        "Binary file, not shown.",
+                        Style::new().add_modifier(Modifier::DIM),
+                    ),
+                    source: None,
+                }],
             };
             self.width = width;
+            if let Some(line) = cursor_line {
+                self.cursor = row_for(&self.rows, line);
+                self.scroll = self.cursor.saturating_sub(cursor_on_screen);
+            }
+            self.anchor = self
+                .anchor
+                .map(|anchor| anchor_line.map_or(anchor, |line| row_for(&self.rows, line)));
         }
-        &self.lines
+        &self.rows
     }
 
-    /// The lines on screen in a page `width` columns by `height` lines, moving the scroll back
-    /// when a reload or resize left it past the end.
-    pub fn page(&mut self, width: u16, height: usize) -> &[Line<'static>] {
-        self.lines(width);
-        self.scroll_by(0, height);
-        let end = (self.scroll + height).min(self.lines.len());
-        &self.lines[self.scroll..end]
+    /// The rows on screen in a page `width` columns by `height` lines, scrolled to keep the
+    /// cursor on it.
+    pub fn page(&mut self, width: u16, height: usize) -> &[Row] {
+        self.rows(width);
+        self.move_cursor(0, height);
+        let end = (self.scroll + height).min(self.rows.len());
+        &self.rows[self.scroll..end]
     }
 
-    /// How many lines the document took at its last layout.
+    /// How many rows the document took at its last layout.
     pub fn len(&self) -> usize {
-        self.lines.len()
+        self.rows.len()
     }
 
-    /// Scroll by `delta` lines, keeping a page of `height` lines on screen where it can.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Move the cursor by `delta` rows, scrolling a page of `height` rows to keep it on screen.
+    pub fn move_cursor(&mut self, delta: isize, height: usize) {
+        self.cursor = self.cursor.saturating_add_signed(delta).min(self.last_row());
+        self.scroll = self.scroll.min(self.cursor).max((self.cursor + 1).saturating_sub(height));
+        self.scroll = self.scroll.min(self.max_scroll(height));
+    }
+
+    /// Scroll by `delta` rows, keeping a page of `height` rows on screen where it can, and the
+    /// cursor on that page.
     pub fn scroll_by(&mut self, delta: isize, height: usize) {
         self.scroll = self.scroll.saturating_add_signed(delta).min(self.max_scroll(height));
+        let bottom = (self.scroll + height).saturating_sub(1);
+        self.cursor = self.cursor.clamp(self.scroll, bottom.max(self.scroll)).min(self.last_row());
     }
 
-    pub fn scroll_to_end(&mut self, height: usize) {
-        self.scroll = self.max_scroll(height);
+    /// Move the view and the cursor together by `delta` rows, as paging does.
+    pub fn page_by(&mut self, delta: isize, height: usize) {
+        self.scroll = self.scroll.saturating_add_signed(delta).min(self.max_scroll(height));
+        self.move_cursor(delta, height);
+    }
+
+    /// Put the cursor on the row `offset` rows down the page.
+    pub fn click(&mut self, offset: usize, height: usize) {
+        self.cursor = (self.scroll + offset).min(self.last_row());
+        self.move_cursor(0, height);
+    }
+
+    /// Start a selection at the cursor, or drop the one there is.
+    pub fn toggle_selection(&mut self) {
+        self.anchor = match self.anchor {
+            Some(_) => None,
+            None => Some(self.cursor),
+        };
+    }
+
+    /// Drop the selection, saying whether there was one.
+    pub fn clear_selection(&mut self) -> bool {
+        self.anchor.take().is_some()
+    }
+
+    pub fn is_selecting(&self) -> bool {
+        self.anchor.is_some()
+    }
+
+    /// The source lines the selection covers, or the cursor's row without one; `None` when no
+    /// source line feeds those rows.
+    pub fn selection(&self) -> Option<Lines> {
+        let rows = self.rows.get(self.selected_rows())?;
+        rows.iter().filter_map(|row| row.source).reduce(Lines::union)
+    }
+
+    /// Whether row `index` shows part of the selection: one of the rows it spans, or another row
+    /// of the same source lines, like a long line's continuation.
+    pub fn is_selected(&self, index: usize) -> bool {
+        let shared = || {
+            let source = self.rows.get(index).and_then(|row| row.source);
+            self.selection().zip(source).is_some_and(|(selection, row)| selection.contains(row))
+        };
+        self.selected_rows().contains(&index) || shared()
+    }
+
+    fn selected_rows(&self) -> RangeInclusive<usize> {
+        let anchor = self.anchor.unwrap_or(self.cursor);
+        anchor.min(self.cursor)..=anchor.max(self.cursor)
+    }
+
+    fn source_line(&self, row: usize) -> Option<usize> {
+        self.rows.get(..=row)?.iter().rev().find_map(|row| row.source).map(|source| source.first)
+    }
+
+    fn last_row(&self) -> usize {
+        self.rows.len().saturating_sub(1)
     }
 
     fn max_scroll(&self, height: usize) -> usize {
-        self.lines.len().saturating_sub(height)
+        self.rows.len().saturating_sub(height)
     }
+}
+
+/// The first row showing source line `line`, or the first after it when none does.
+fn row_for(rows: &[Row], line: usize) -> usize {
+    let shows = |row: &Row| row.source.is_some_and(|source| source.last >= line);
+    rows.iter().position(shows).unwrap_or(rows.len().saturating_sub(1))
 }
 
 fn read(path: &Path, bytes: &[u8]) -> Content {
@@ -148,11 +245,11 @@ mod tests {
         let path = temp("change");
         fs::write(&path, "one").unwrap();
         let mut doc = Doc::open(path.clone());
-        assert_eq!(doc.lines(20)[0].to_string(), "one");
+        assert_eq!(doc.rows(20)[0].line.to_string(), "one");
 
         fs::write(&path, "two words").unwrap();
         doc.refresh();
-        assert_eq!(doc.lines(20)[0].to_string(), "two words");
+        assert_eq!(doc.rows(20)[0].line.to_string(), "two words");
     }
 
     #[test]
@@ -164,12 +261,12 @@ mod tests {
         fs::remove_file(&path).unwrap();
         doc.refresh();
         assert!(doc.is_missing());
-        assert_eq!(doc.lines(20)[0].to_string(), "kept");
+        assert_eq!(doc.rows(20)[0].line.to_string(), "kept");
 
         fs::write(&path, "back").unwrap();
         doc.refresh();
         assert!(!doc.is_missing());
-        assert_eq!(doc.lines(20)[0].to_string(), "back");
+        assert_eq!(doc.rows(20)[0].line.to_string(), "back");
     }
 
     #[test]
@@ -177,22 +274,68 @@ mod tests {
         let dir = temp("kinds").with_file_name("");
         fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
         fs::write(dir.join("blob.bin"), [0x89, 0, 1]).unwrap();
-        assert_eq!(Doc::open(dir.join("main.rs")).lines(20)[0].to_string(), "1 fn main() {}");
+        assert_eq!(Doc::open(dir.join("main.rs")).rows(20)[0].line.to_string(), "1 fn main() {}");
         assert_eq!(
-            Doc::open(dir.join("blob.bin")).lines(30)[0].to_string(),
+            Doc::open(dir.join("blob.bin")).rows(30)[0].line.to_string(),
             "Binary file, not shown."
         );
     }
 
     #[test]
-    fn scrolling_stops_at_the_last_page() {
+    fn scrolling_stops_at_the_last_page_and_takes_the_cursor_along() {
         let path = temp("scroll");
         fs::write(&path, "a\n\nb\n\nc").unwrap();
         let mut doc = Doc::open(path);
-        doc.lines(20);
+        doc.rows(20);
         doc.scroll_by(10, 2);
-        assert_eq!(doc.scroll, 3);
+        assert_eq!((doc.scroll, doc.cursor()), (3, 3));
         doc.scroll_by(-10, 2);
-        assert_eq!(doc.scroll, 0);
+        assert_eq!((doc.scroll, doc.cursor()), (0, 1));
+    }
+
+    #[test]
+    fn the_cursor_keeps_its_page_on_screen() {
+        let path = temp("cursor").with_file_name("cursor.rs");
+        fs::write(&path, "1\n2\n3\n4\n5\n").unwrap();
+        let mut doc = Doc::open(path);
+        doc.rows(20);
+        doc.move_cursor(3, 2);
+        assert_eq!((doc.cursor(), doc.scroll), (3, 2));
+        doc.move_cursor(10, 2);
+        assert_eq!((doc.cursor(), doc.scroll), (4, 3));
+        doc.move_cursor(-4, 2);
+        assert_eq!((doc.cursor(), doc.scroll), (0, 0));
+    }
+
+    #[test]
+    fn a_selection_spans_the_source_lines_between_its_ends() {
+        let path = temp("select").with_file_name("select.rs");
+        fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let mut doc = Doc::open(path);
+        doc.rows(20);
+        assert_eq!(doc.selection(), Some(Lines::one(1)));
+        doc.move_cursor(2, 10);
+        doc.toggle_selection();
+        doc.move_cursor(-1, 10);
+        assert_eq!(doc.selection(), Some(Lines { first: 2, last: 3 }));
+        assert!(doc.clear_selection());
+        assert_eq!(doc.selection(), Some(Lines::one(2)));
+    }
+
+    #[test]
+    fn a_long_lines_continuation_is_selected_with_it_and_a_resize_keeps_the_cursor_on_it() {
+        let path = temp("wrap").with_file_name("wrap.rs");
+        fs::write(&path, "a\nbbbbbbbb\nc\n").unwrap();
+        let mut doc = Doc::open(path);
+        doc.rows(6);
+        doc.move_cursor(3, 10);
+        assert_eq!(doc.selection(), Some(Lines::one(3)));
+        doc.move_cursor(-2, 10);
+        assert_eq!(doc.selection(), Some(Lines::one(2)));
+        assert!(doc.is_selected(1) && doc.is_selected(2) && !doc.is_selected(3));
+
+        doc.rows(20);
+        assert_eq!(doc.cursor(), 1);
+        assert_eq!(doc.selection(), Some(Lines::one(2)));
     }
 }

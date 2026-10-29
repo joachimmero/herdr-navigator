@@ -65,7 +65,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     let mut status = Vec::new();
     if let (Some(area), Some(doc)) = (panes.file, &mut app.doc) {
-        status = draw_doc(frame, doc, area);
+        status = draw_doc(frame, doc, area, app.focus == Focus::File);
     }
     if app.tree.is_scanning() {
         status.insert(0, Span::styled("scanning… ", dim()));
@@ -121,15 +121,39 @@ fn tree_row(tree: &Tree, row: &Row, selected: bool, focused: bool) -> Line<'stat
     }
 }
 
-/// Draw the file and return its part of the title bar's status.
-fn draw_doc(frame: &mut Frame, doc: &mut Doc, area: Rect) -> Vec<Span<'static>> {
+/// Draw the file, its cursor and selection marked in the margin, and return its part of the
+/// title bar's status.
+fn draw_doc(frame: &mut Frame, doc: &mut Doc, area: Rect, focused: bool) -> Vec<Span<'static>> {
     let height = usize::from(area.height);
-    frame.render_widget(Paragraph::new(doc.page(area.width, height).to_vec()), area);
+    let lines: Vec<Line> =
+        doc.page(area.width, height).iter().map(|row| row.line.clone()).collect();
+    let shown = lines.len();
+    frame.render_widget(Paragraph::new(lines), area);
+
+    let mark = if focused { Style::new().fg(Color::Cyan) } else { dim() };
+    let marks: Vec<Line> = (doc.scroll..doc.scroll + shown)
+        .map(|index| match (index == doc.cursor(), doc.is_selected(index)) {
+            (true, _) => Line::styled("▌", mark.add_modifier(Modifier::BOLD)),
+            (false, true) => Line::styled("▎", mark),
+            (false, false) => Line::raw(""),
+        })
+        .collect();
+    let margin = Rect { x: area.x.saturating_sub(MARGIN), width: 1, ..area };
+    frame.render_widget(Paragraph::new(marks), margin);
 
     let total = doc.len();
     let mut status = Vec::new();
     if doc.is_missing() {
         status.push(Span::styled("file missing ", Style::new().fg(Color::Red)));
+    }
+    if let Some(lines) = doc.selection() {
+        let label = if lines.first == lines.last {
+            format!("L{} ", lines.first)
+        } else {
+            format!("L{}–{} ", lines.first, lines.last)
+        };
+        let style = if doc.is_selecting() { Style::new().fg(Color::Cyan) } else { dim() };
+        status.push(Span::styled(label, style));
     }
     if total > height {
         let percent = (doc.scroll + height).min(total) * 100 / total;

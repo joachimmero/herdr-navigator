@@ -4,10 +4,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
+use crate::layout::{Lines, Row};
+
 const TAB: &str = "    ";
 
 /// `lines`, already styled, laid out for `width` columns.
-pub fn layout(lines: &[Vec<Span<'static>>], width: u16) -> Vec<Line<'static>> {
+pub fn layout(lines: &[Vec<Span<'static>>], width: u16) -> Vec<Row> {
     let digits = lines.len().max(1).to_string().len();
     let gutter = digits + 1;
     let text_width = usize::from(width).saturating_sub(gutter).max(1);
@@ -19,7 +21,8 @@ pub fn layout(lines: &[Vec<Span<'static>>], width: u16) -> Vec<Line<'static>> {
                 let number =
                     if row == 0 { format!("{:>digits$} ", index + 1) } else { " ".repeat(gutter) };
                 let number = Span::styled(number, Style::new().add_modifier(Modifier::DIM));
-                Line::from([vec![number], spans].concat())
+                let line = Line::from([vec![number], spans].concat());
+                Row { line, source: Some(Lines::one(index + 1)) }
             })
         })
         .collect()
@@ -53,8 +56,8 @@ fn wrap(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
 mod tests {
     use super::*;
 
-    fn text(lines: &[Line]) -> Vec<String> {
-        lines.iter().map(Line::to_string).collect()
+    fn text(rows: &[Row]) -> Vec<String> {
+        rows.iter().map(|row| row.line.to_string()).collect()
     }
 
     #[test]
@@ -75,6 +78,7 @@ mod tests {
         let lines = [vec![Span::raw("\ta"), Span::styled("bcd", bold)]];
         let laid = layout(&lines, 6);
         assert_eq!(text(&laid), ["1     ", "  abcd"]);
-        assert_eq!(laid[1].spans.last().unwrap().style, bold);
+        assert_eq!(laid[1].line.spans.last().unwrap().style, bold);
+        assert!(laid.iter().all(|row| row.source == Some(Lines::one(1))));
     }
 }

@@ -6,6 +6,7 @@ mod doc;
 mod herdr;
 mod highlight;
 mod inbox;
+mod layout;
 mod markdown;
 mod tree;
 mod ui;
