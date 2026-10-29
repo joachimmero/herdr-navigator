@@ -9,8 +9,9 @@ the chat.
   While the file is gone it keeps the last content and says the file is missing.
 - The project's files sit in a tree beside the file, which shows each file as you move onto it
   and keeps up as files come and go.
-- Headings, emphasis, lists and task lists, quotes, code blocks, rules, links (with their target
-  shown), footnotes, and tables, which shrink their columns and wrap cells to fit the pane.
+- Markdown shows rendered: headings, emphasis, lists and task lists, quotes, code blocks, rules,
+  links (with their target shown), footnotes, and tables, which shrink their columns and wrap
+  cells to fit the pane. `m` flips it to its source and back, for every file the pane opens.
 - Any other file shows as its source, syntax-highlighted in the terminal's own colors, with line
   numbers. A binary file shows a notice instead.
 
@@ -75,6 +76,7 @@ In a file:
 | `Ctrl+o` `Ctrl+i` | Go back to where a jump left from, forward again |
 | `/` | Search the project |
 | `Ctrl+f` | Find text in the file |
+| `m` | Show markdown as its source, or rendered again |
 | `l` | List every comment |
 | `s` | Send every comment to an agent |
 | `y` | Copy every comment |
@@ -95,6 +97,7 @@ In the tree:
 | `Tab` | Go to the file |
 | `/` | Search the project |
 | `Ctrl+f` | Find text in the file |
+| `m` | Show markdown as its source, or rendered again |
 | `Ctrl+o` `Ctrl+i` | Go back to where a jump left from, forward again |
 | `r` | Look for files again |
 | `q` | Close the pane |

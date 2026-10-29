@@ -64,6 +64,8 @@ pub struct App {
     /// A place pointed at while a comment was being written, which `⏎` goes to once it's done.
     pub pending: Option<Location>,
     jumps: Jumps,
+    /// Whether markdown shows rendered rather than as its source, in every file the pane opens.
+    rendered: bool,
     /// Started the first time search opens.
     searcher: Option<Searcher>,
     /// The pane the comments last went to, which the picker opens on.
@@ -139,6 +141,7 @@ impl App {
             notice: None,
             pending: None,
             jumps: Jumps::default(),
+            rendered: true,
             searcher: None,
             last_sent: None,
             inbox,
@@ -210,7 +213,8 @@ impl App {
 
     fn open(&mut self, file: PathBuf) {
         if !self.doc.as_ref().is_some_and(|doc| doc.path == file) {
-            let doc = Doc::open(file);
+            let mut doc = Doc::open(file);
+            doc.set_rendered(self.rendered);
             self.comments.reanchor(&doc.path, doc.text());
             self.doc = Some(doc);
         }
@@ -343,6 +347,13 @@ impl App {
                     self.mode = Mode::Find(Field::new(String::new()));
                 }
             }
+            KeyCode::Char('m') => match &mut self.doc {
+                Some(doc) if doc.is_markdown() => {
+                    self.rendered = !self.rendered;
+                    doc.set_rendered(self.rendered);
+                }
+                _ => self.notice = Some("not markdown".into()),
+            },
             KeyCode::Enter if self.pending.is_some() => {
                 let pending = self.pending.take().expect("checked just above");
                 self.go(pending);

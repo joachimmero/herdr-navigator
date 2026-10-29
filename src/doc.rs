@@ -22,7 +22,8 @@ struct Stamp {
 
 /// What the file holds, as the pane shows it.
 enum Content {
-    Markdown,
+    /// Each line styled by its grammar, as for code.
+    Markdown(Vec<Vec<Span<'static>>>),
     /// Each line styled by its grammar.
     Code(Vec<Vec<Span<'static>>>),
     Binary,
@@ -84,6 +85,8 @@ pub struct Doc {
     centering: bool,
     /// Dropped whenever the rows are laid out again, since its points are rows on screen.
     drag: Option<Drag>,
+    /// Whether markdown is laid out rendered rather than as its source.
+    rendered: bool,
 }
 
 impl Doc {
@@ -104,9 +107,23 @@ impl Doc {
             pointed: None,
             centering: false,
             drag: None,
+            rendered: true,
         };
         doc.refresh();
         doc
+    }
+
+    pub fn is_markdown(&self) -> bool {
+        matches!(self.content, Content::Markdown(_))
+    }
+
+    /// Lay markdown out rendered or as its source from the next layout on, keeping the cursor
+    /// on the source line it is on.
+    pub fn set_rendered(&mut self, rendered: bool) {
+        if rendered != self.rendered {
+            self.rendered = rendered;
+            self.width = 0;
+        }
     }
 
     pub fn is_missing(&self) -> bool {
@@ -145,8 +162,8 @@ impl Doc {
         self.drag = None;
         if width != self.width {
             self.rows = match &self.content {
-                Content::Markdown => markdown::render(&self.text, width),
-                Content::Code(lines) => code::layout(lines, width),
+                Content::Markdown(_) if self.rendered => markdown::render(&self.text, width),
+                Content::Markdown(lines) | Content::Code(lines) => code::layout(lines, width),
                 Content::Binary => vec![Row {
                     line: Line::styled(
                         "Binary file, not shown.",
@@ -511,11 +528,12 @@ fn read(path: &Path, bytes: &[u8]) -> (Content, String) {
         return (Content::Binary, String::new());
     }
     let text = String::from_utf8_lossy(bytes).into_owned();
-    if is_markdown(path) {
-        return (Content::Markdown, text);
-    }
     let lines: Vec<&str> = text.lines().collect();
-    (Content::Code(highlight::highlight(path, &lines)), text)
+    let styled = highlight::highlight(path, &lines);
+    match is_markdown(path) {
+        true => (Content::Markdown(styled), text),
+        false => (Content::Code(styled), text),
+    }
 }
 
 pub fn is_markdown(path: &Path) -> bool {
@@ -554,6 +572,24 @@ mod tests {
         doc.press(0, 30, 100);
         assert_eq!(doc.release(), None, "a click past the end copies nothing");
         assert_eq!(doc.dragged(0), None);
+    }
+
+    #[test]
+    fn markdown_flips_to_its_source_and_back_keeping_the_cursor_on_its_line() {
+        let path = temp("flip");
+        fs::write(&path, "# Title\n\ntext").unwrap();
+        let mut doc = Doc::open(path);
+        assert_eq!(lines(&mut doc, 20)[0].to_string(), "Title");
+        doc.go_to_line(3);
+        lines(&mut doc, 20);
+
+        doc.set_rendered(false);
+        let source: Vec<String> = lines(&mut doc, 20).iter().map(Line::to_string).collect();
+        assert_eq!(source, ["1 # Title", "2 ", "3 text"]);
+        assert_eq!(doc.cursor(), 2);
+
+        doc.set_rendered(true);
+        assert_eq!(lines(&mut doc, 20)[doc.cursor()].to_string(), "text");
     }
 
     #[test]
