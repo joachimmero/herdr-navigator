@@ -247,13 +247,35 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) if in_file => {
                 let file = panes.file.expect("the click landed in it");
                 if let Some(doc) = &mut self.doc {
-                    doc.click(usize::from(at.y - file.y), panes.page());
+                    let column = usize::from(at.x - file.x);
+                    doc.press(usize::from(at.y - file.y), column, panes.page());
                     self.focus = Focus::File;
+                }
+                return;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let (Some(doc), Some(file)) = (&mut self.doc, panes.file) {
+                    // Lossless: both are u16s.
+                    let offset = (i32::from(at.y) - i32::from(file.y)) as isize;
+                    let column = usize::from(at.x.saturating_sub(file.x));
+                    doc.drag_to(offset, column, panes.page());
+                }
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(text) = self.doc.as_mut().and_then(Doc::release) {
+                    self.notice = Some(match pbcopy(&text) {
+                        Ok(()) => format!("copied {} characters", text.chars().count()),
+                        Err(error) => format!("copy failed: {error}"),
+                    });
                 }
                 return;
             }
             MouseEventKind::Down(MouseButton::Left) if in_tree => {
                 let tree = panes.tree.expect("the click landed in it");
+                if let Some(doc) = &mut self.doc {
+                    doc.clear_drag();
+                }
                 let row = usize::from(at.y - tree.y) + self.tree.offset.get();
                 let again = row == self.tree.selected_index();
                 self.tree.select_index(row);
@@ -282,6 +304,9 @@ impl App {
             return;
         }
         self.notice = None;
+        if let Some(doc) = &mut self.doc {
+            doc.clear_drag();
+        }
         match &mut self.mode {
             Mode::Picker { .. } => return self.on_picker_key(key),
             Mode::Search(_) => return self.on_search_key(key, panes),

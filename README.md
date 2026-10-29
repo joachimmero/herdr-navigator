@@ -64,6 +64,7 @@ In a file:
 | --- | --- |
 | `j` `k` / `↓` `↑`, click | Move the cursor |
 | mouse wheel | Scroll, taking the cursor along |
+| drag | Copy the text dragged over |
 | `Ctrl+d` `Ctrl+u` | Move half a page down, up |
 | `space` / `PgDn`, `PgUp` | Move a page down, up |
 | `g` `G` / `Home` `End` | Go to the top, the bottom |
@@ -100,6 +101,10 @@ In the tree:
 
 The cursor and the selection are marked in the margin, and the title bar shows the source lines
 they cover, so in rendered markdown you can see which lines of the file a paragraph came from.
+
+Dragging over the file copies the text as it's shown, without line numbers or bullets, a line
+break at the end of each row on screen. Dragging past the top or bottom scrolls. The copied text
+stays marked until the next key or click.
 
 Pointing from the command line, `n` `N`, opening a search result, and `⏎` in the comment list
 are jumps: `Ctrl+o` goes back to where each one left from, like vim's jumplist. `Ctrl+i` needs a

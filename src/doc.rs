@@ -1,12 +1,13 @@
 //! The file the pane shows, kept in step with the disk, with its comments' cards among its rows.
 
 use std::fs;
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
 
 use crate::comment::{self, Comments};
 use crate::layout::{self, Lines, Row};
@@ -25,6 +26,30 @@ enum Content {
     /// Each line styled by its grammar.
     Code(Vec<Vec<Span<'static>>>),
     Binary,
+}
+
+/// A character of the file's text on screen: its row, and how many characters into the row's
+/// text it is.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Point {
+    row: usize,
+    char: usize,
+}
+
+/// Text dragged over with the mouse, both ends included.
+#[derive(Clone, Copy)]
+struct Drag {
+    anchor: Point,
+    extent: Point,
+    /// Whether the button is still down, so the extent still follows the pointer.
+    held: bool,
+}
+
+impl Drag {
+    /// Its ends in the order they read.
+    fn ordered(self) -> (Point, Point) {
+        (self.anchor.min(self.extent), self.anchor.max(self.extent))
+    }
 }
 
 /// One row on screen: one of the file's rows, or a line of a comment's card under them.
@@ -57,6 +82,8 @@ pub struct Doc {
     pointed: Option<Lines>,
     /// Whether the next layout puts the cursor in the middle of the page.
     centering: bool,
+    /// Dropped whenever the rows are laid out again, since its points are rows on screen.
+    drag: Option<Drag>,
 }
 
 impl Doc {
@@ -76,6 +103,7 @@ impl Doc {
             goto: None,
             pointed: None,
             centering: false,
+            drag: None,
         };
         doc.refresh();
         doc
@@ -114,6 +142,7 @@ impl Doc {
         let cursor_line = self.source_line(self.cursor);
         let anchor_line = self.anchor.and_then(|anchor| self.source_line(anchor));
         let cursor_on_screen = self.cursor.saturating_sub(self.scroll);
+        self.drag = None;
         if width != self.width {
             self.rows = match &self.content {
                 Content::Markdown => markdown::render(&self.text, width),
@@ -327,6 +356,88 @@ impl Doc {
         }
     }
 
+    /// Put the cursor on the row `offset` rows down the page and start dragging from the
+    /// character `column` columns across it.
+    pub fn press(&mut self, offset: usize, column: usize, height: usize) {
+        self.click(offset, height);
+        let point = self.point_at(self.scroll + offset, column);
+        self.drag = point.map(|point| Drag { anchor: point, extent: point, held: true });
+    }
+
+    /// Carry a held drag to the character under the pointer, `offset` rows down the page and
+    /// `column` columns across, first scrolling a row when the pointer is above or below it.
+    pub fn drag_to(&mut self, offset: isize, column: usize, height: usize) {
+        if !self.drag.is_some_and(|drag| drag.held) {
+            return;
+        }
+        let past = isize::try_from(height.max(1)).unwrap_or(isize::MAX);
+        if offset < 0 || offset >= past {
+            self.scroll_by(offset.signum(), height);
+        }
+        let row = self.scroll.saturating_add_signed(offset.clamp(0, past - 1)).min(self.last_row());
+        if let (Some(point), Some(drag)) = (self.point_at(row, column), &mut self.drag) {
+            drag.extent = point;
+        }
+    }
+
+    /// Let go of a held drag: the text it covers, which stays marked, or `None` when it never
+    /// left the character it started on.
+    pub fn release(&mut self) -> Option<String> {
+        let drag = self.drag.as_mut().filter(|drag| drag.held)?;
+        if drag.anchor == drag.extent {
+            self.drag = None;
+            return None;
+        }
+        drag.held = false;
+        let (from, to) = drag.ordered();
+        let texts = (from.row..=to.row).filter_map(|row| Some((row, self.text_of(row)?)));
+        let pieces = texts.map(|(row, text)| {
+            let first = if row == from.row { from.char } else { 0 };
+            let last = if row == to.row { to.char } else { usize::MAX };
+            text.chars().skip(first).take(last.saturating_add(1) - first).collect::<String>()
+        });
+        Some(pieces.collect::<Vec<_>>().join("\n"))
+    }
+
+    pub fn clear_drag(&mut self) {
+        self.drag = None;
+    }
+
+    /// The bytes of row `index`'s text the drag covers.
+    pub fn dragged(&self, index: usize) -> Option<Range<usize>> {
+        let (from, to) = self.drag?.ordered();
+        if !(from.row..=to.row).contains(&index) {
+            return None;
+        }
+        let text = self.text_of(index)?;
+        let byte = |char: usize| text.char_indices().nth(char).map_or(text.len(), |(at, _)| at);
+        let first = if index == from.row { byte(from.char) } else { 0 };
+        let end = if index == to.row { byte(to.char + 1) } else { text.len() };
+        Some(first..end)
+    }
+
+    /// The character of row `index`'s text `column` columns across the page, the nearest one
+    /// when the column is in the margin or past the end; `None` for a card's row.
+    fn point_at(&self, index: usize, column: usize) -> Option<Point> {
+        let chrome = self.chrome(index)?;
+        let line = self.line(index);
+        let margin: usize = line.spans.iter().take(chrome).map(Span::width).sum();
+        let widths: Vec<usize> =
+            layout::text(line, chrome).chars().map(|ch| ch.width().unwrap_or(0)).collect();
+        let mut left = column.saturating_sub(margin);
+        let under = widths.iter().position(|&width| {
+            let here = left < width;
+            left = left.saturating_sub(width);
+            here
+        });
+        Some(Point { row: index, char: under.unwrap_or(widths.len().saturating_sub(1)) })
+    }
+
+    /// Row `index`'s text past its line number or bullet; `None` for a card's row.
+    fn text_of(&self, index: usize) -> Option<String> {
+        Some(layout::text(self.line(index), self.chrome(index)?))
+    }
+
     fn selected_rows(&self) -> RangeInclusive<usize> {
         let anchor = self.anchor.unwrap_or(self.cursor);
         anchor.min(self.cursor)..=anchor.max(self.cursor)
@@ -426,6 +537,23 @@ mod tests {
 
     fn lines(doc: &mut Doc, width: u16) -> Vec<Line<'static>> {
         doc.page(width, 100, &Comments::default(), 0)
+    }
+
+    #[test]
+    fn a_drag_copies_from_the_character_it_started_on_to_the_one_it_ended_on() {
+        let path = temp("drag");
+        fs::write(&path, "alpha beta\n\ngamma delta").unwrap();
+        let mut doc = Doc::open(path);
+        lines(&mut doc, 20);
+        doc.press(2, 8, 100);
+        doc.drag_to(0, 6, 100);
+        assert_eq!(doc.release().as_deref(), Some("beta\n\ngamma del"));
+        assert_eq!(doc.dragged(0), Some(6..10));
+        assert_eq!(doc.dragged(2), Some(0..9));
+
+        doc.press(0, 30, 100);
+        assert_eq!(doc.release(), None, "a click past the end copies nothing");
+        assert_eq!(doc.dragged(0), None);
     }
 
     #[test]

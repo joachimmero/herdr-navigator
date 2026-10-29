@@ -16,7 +16,7 @@ use crate::doc::Doc;
 use crate::field::Field;
 use crate::find;
 use crate::herdr::Agent;
-use crate::layout::Lines;
+use crate::layout::{self, Lines};
 use crate::search::{CodeHit, Kind, Phase, ResultRow, Search};
 use crate::tree::{Row, Tree};
 
@@ -231,16 +231,24 @@ fn draw_doc(
 ) -> Vec<Span<'static>> {
     let height = usize::from(area.height);
     let box_height = composer.map_or(0, |composer| composer_height(composer, area));
-    let mut lines = doc.page(area.width, height, comments, usize::from(box_height));
-    if let Some(query) = find {
-        lines = (doc.scroll..)
-            .zip(lines)
-            .map(|(index, line)| match doc.chrome(index) {
-                Some(chrome) => find::highlight(line, chrome, query),
+    let lines = doc.page(area.width, height, comments, usize::from(box_height));
+    let lines: Vec<Line> = (doc.scroll..)
+        .zip(lines)
+        .map(|(index, line)| {
+            let Some(chrome) = doc.chrome(index) else { return line };
+            let line = match find {
+                Some(query) => find::highlight(line, chrome, query),
                 None => line,
-            })
-            .collect();
-    }
+            };
+            let dragged = doc.dragged(index);
+            layout::mark(
+                line,
+                chrome,
+                dragged.as_slice(),
+                Style::new().add_modifier(Modifier::REVERSED),
+            )
+        })
+        .collect();
     let shown = lines.len();
     frame.render_widget(Paragraph::new(lines), area);
     if let Some(composer) = composer {
