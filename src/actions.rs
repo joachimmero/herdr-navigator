@@ -1,4 +1,5 @@
-//! The plugin's toggle, open, and close actions on the invoking workspace's herdr-md pane.
+//! The plugin's toggle, open, and close actions on the invoking workspace's herdr-md pane, and
+//! the find-or-open showing a file needs.
 
 use std::fs::File;
 use std::path::Path;
@@ -57,9 +58,26 @@ fn act(action: Action) -> Result<String, String> {
         (Action::Close, true) => Ok("nothing open".into()),
         (Action::Toggle | Action::Open, true) => {
             let (target, cwd) = placement(&ws, &context, &panes)?;
-            let pane = open_beside(&target, &cwd, true)?;
+            let pane = open_beside(&target, &cwd, true, None)?;
             Ok(format!("opened {pane} in {cwd}"))
         }
+    }
+}
+
+pub enum Pane {
+    /// Opened for the request, already showing its file.
+    Opened(String),
+    Existing(String),
+}
+
+/// The herdr-md pane in workspace `ws`, opened beside pane `beside` in `cwd` showing `file`
+/// when there is none, without taking the focus.
+pub fn find_or_open(ws: &str, beside: &str, cwd: &Path, file: &Path) -> Result<Pane, String> {
+    let _lock = lock(ws)?;
+    let (_, open) = panes(ws)?;
+    match open.into_iter().next() {
+        Some(pane) => Ok(Pane::Existing(pane)),
+        None => open_beside(beside, &cwd.to_string_lossy(), false, Some(file)).map(Pane::Opened),
     }
 }
 
@@ -96,9 +114,16 @@ fn placement(ws: &str, context: &Value, panes: &[Value]) -> Result<(String, Stri
     Ok((target, cwd))
 }
 
-/// Open a herdr-md pane in `cwd` as a split to the right of pane `target`, returning its id.
-fn open_beside(target: &str, cwd: &str, focus: bool) -> Result<String, String> {
+/// Open a herdr-md pane in `cwd` as a split to the right of pane `target`, showing `file` if
+/// given, and return its id.
+fn open_beside(
+    target: &str,
+    cwd: &str,
+    focus: bool,
+    file: Option<&Path>,
+) -> Result<String, String> {
     let plugin = herdr::plugin_id();
+    let env = file.map(|file| format!("{FILE_VAR}={}", file.display()));
     let mut args = vec![
         "plugin",
         "pane",
@@ -117,6 +142,9 @@ fn open_beside(target: &str, cwd: &str, focus: bool) -> Result<String, String> {
         cwd,
     ];
     args.push(if focus { "--focus" } else { "--no-focus" });
+    if let Some(env) = &env {
+        args.extend(["--env", env]);
+    }
     let opened = herdr::call(&args)?;
     text(&opened, "/plugin_pane/pane/pane_id")
         .ok_or_else(|| format!("herdr opened a pane in {cwd} without naming it"))
@@ -140,6 +168,9 @@ fn shows_md(pane: &str) -> bool {
 }
 
 const BINARY: &str = env!("CARGO_PKG_NAME");
+
+/// Names the file a newly opened pane shows first.
+pub const FILE_VAR: &str = "HERDR_MD_FILE";
 
 fn lock(ws: &str) -> Result<File, String> {
     let dir = herdr::state_dir()?;

@@ -1,7 +1,9 @@
 mod actions;
 mod app;
+mod client;
 mod doc;
 mod herdr;
+mod inbox;
 mod markdown;
 mod picker;
 mod ui;
@@ -12,10 +14,12 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     ExitCode::from(match args.as_slice() {
-        [] => app::run(herdr::var("HERDR_MD_FILE").map(PathBuf::from)),
+        [] => app::run(herdr::var(actions::FILE_VAR).map(PathBuf::from)),
         [flag, name] if flag == "--action" => actions::run(name),
+        [file] if !file.starts_with('-') => client::run(file),
         _ => {
-            eprintln!("usage: herdr-md [--action toggle|open|close]");
+            eprintln!("usage: {}", client::USAGE);
+            eprintln!("       herdr-md [--action toggle|open|close]");
             2
         }
     })

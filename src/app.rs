@@ -12,6 +12,8 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 
 use crate::doc::Doc;
+use crate::herdr;
+use crate::inbox::Inbox;
 use crate::picker::Picker;
 use crate::ui;
 
@@ -23,6 +25,8 @@ pub enum Screen {
 pub struct App {
     pub screen: Screen,
     pub picker: Picker,
+    /// Where `herdr-md <file>` posts files for this pane; `None` outside herdr.
+    inbox: Option<Inbox>,
     quit: bool,
 }
 
@@ -33,9 +37,14 @@ const WHEEL_LINES: isize = 3;
 /// process exit code.
 pub fn run(file: Option<PathBuf>) -> u8 {
     let cwd = std::env::current_dir().unwrap_or_default();
+    let inbox = herdr::var("HERDR_PANE_ID").and_then(|pane| Inbox::for_pane(&pane).ok());
+    // Left by an earlier pane with the same id.
+    if let Some(inbox) = &inbox {
+        inbox.take();
+    }
     let mut terminal = ratatui::init();
     let _ = execute!(io::stdout(), EnableMouseCapture);
-    let outcome = App::new(Picker::new(&cwd), file).run(&mut terminal);
+    let outcome = App::new(Picker::new(&cwd), inbox, file).run(&mut terminal);
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     match outcome {
@@ -63,8 +72,8 @@ fn half_page_direction(key: &KeyEvent) -> Option<isize> {
 }
 
 impl App {
-    fn new(picker: Picker, file: Option<PathBuf>) -> Self {
-        let mut app = Self { screen: Screen::Picker, picker, quit: false };
+    fn new(picker: Picker, inbox: Option<Inbox>, file: Option<PathBuf>) -> Self {
+        let mut app = Self { screen: Screen::Picker, picker, inbox, quit: false };
         match file {
             Some(file) => app.screen = Screen::Doc(Doc::open(file)),
             None => app.show_picker(),
@@ -74,6 +83,9 @@ impl App {
 
     fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.quit {
+            if let Some(file) = self.inbox.as_ref().and_then(Inbox::take) {
+                self.show(file);
+            }
             match &mut self.screen {
                 Screen::Picker => self.picker.poll(),
                 Screen::Doc(doc) => doc.refresh(),
@@ -85,6 +97,13 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Show `file`, keeping the place in it when it is already showing.
+    fn show(&mut self, file: PathBuf) {
+        if !matches!(&self.screen, Screen::Doc(doc) if doc.path == file) {
+            self.screen = Screen::Doc(Doc::open(file));
+        }
     }
 
     fn show_picker(&mut self) {
