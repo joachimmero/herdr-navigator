@@ -5,6 +5,7 @@ mod code;
 mod comment;
 mod composer;
 mod doc;
+mod field;
 mod herdr;
 mod highlight;
 mod inbox;

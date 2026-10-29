@@ -19,6 +19,7 @@ use ratatui::layout::{Position, Rect};
 use crate::comment::{self, Comment, Comments};
 use crate::composer::{Composer, Target};
 use crate::doc::Doc;
+use crate::field::Field;
 use crate::herdr::{self, Agent};
 use crate::inbox::Inbox;
 use crate::jumps::{Jumps, Place};
@@ -255,7 +256,7 @@ impl App {
         match &mut self.mode {
             Mode::Picker { .. } => return self.on_picker_key(key),
             Mode::Composing(composer) => {
-                if on_composer_key(composer, key) {
+                if on_composer_key(&mut composer.field, key) {
                     self.finish_composing(key.code == KeyCode::Enter);
                 }
                 return;
@@ -338,7 +339,7 @@ impl App {
         let Mode::Composing(composer) = std::mem::replace(&mut self.mode, Mode::Browse) else {
             return;
         };
-        let text = composer.text.trim_end().to_owned();
+        let text = composer.field.text.trim_end().to_owned();
         if !save || text.trim().is_empty() {
             return;
         }
@@ -543,20 +544,20 @@ impl App {
 }
 
 /// Edit the comment box, saying whether the key closes it: `Enter` to save, `Esc` to cancel.
-fn on_composer_key(composer: &mut Composer, key: KeyEvent) -> bool {
+fn on_composer_key(field: &mut Field, key: KeyEvent) -> bool {
     let newline = key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Enter if newline => composer.insert('\n'),
-        KeyCode::Char('j') if control => composer.insert('\n'),
+        KeyCode::Enter if newline => field.insert('\n'),
+        KeyCode::Char('j') if control => field.insert('\n'),
         KeyCode::Enter | KeyCode::Esc => return true,
-        KeyCode::Backspace => composer.backspace(),
-        KeyCode::Delete => composer.delete(),
-        KeyCode::Left => composer.left(),
-        KeyCode::Right => composer.right(),
-        KeyCode::Home => composer.home(),
-        KeyCode::End => composer.end(),
-        KeyCode::Char(ch) if !control => composer.insert(ch),
+        KeyCode::Backspace => field.backspace(),
+        KeyCode::Delete => field.delete(),
+        KeyCode::Left => field.left(),
+        KeyCode::Right => field.right(),
+        KeyCode::Home => field.home(),
+        KeyCode::End => field.end(),
+        KeyCode::Char(ch) if !control => field.insert(ch),
         _ => {}
     }
     false

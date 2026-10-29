@@ -203,7 +203,7 @@ fn draw_doc(
 
 /// The rows the comment box takes: its text's, between two borders, at most half the file.
 fn composer_height(composer: &Composer, area: Rect) -> u16 {
-    let rows = composer.rows(usize::from(area.width.saturating_sub(2))).0.len();
+    let rows = composer.field.rows(usize::from(area.width.saturating_sub(2))).0.len();
     u16::try_from(rows + 2).unwrap_or(u16::MAX).min((area.height / 2).max(3))
 }
 
@@ -222,10 +222,10 @@ fn draw_composer(frame: &mut Frame, composer: &Composer, comments: &Comments, ar
         .title(title)
         .title_bottom(Line::styled(" ⏎ save · ⇧⏎ newline · esc cancel ", dim()).right_aligned());
     let inner = block.inner(area);
-    let (rows, (row, column)) = composer.rows(usize::from(inner.width));
+    let (rows, (row, column)) = composer.field.rows(usize::from(inner.width));
     // A box too short for its text scrolls to keep the caret's row in it.
     let scroll = row.saturating_sub(usize::from(inner.height).saturating_sub(1));
-    let text: Vec<Line> = if composer.text.is_empty() {
+    let text: Vec<Line> = if composer.field.text.is_empty() {
         vec![Line::styled("Leave a comment…", dim())]
     } else {
         rows.into_iter().skip(scroll).map(Line::raw).collect()
