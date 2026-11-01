@@ -31,14 +31,14 @@ On Windows, run it from Git Bash.
 
 That builds the release binary with `cargo`, puts it at `bin/herdr-navigator` (`.exe` on Windows),
 puts `herdr-navigator` on `PATH` through `~/.local/bin`, and runs `herdr plugin link`. On Windows
-it also adds that folder to the user PATH. Then bind the toggle to a key in herdr's `config.toml`:
+it also adds that folder to the user PATH. Then bind open to a key in herdr's `config.toml`:
 
 ```toml
 [[keys.command]]
 key = "prefix+m"
 type = "plugin_action"
-command = "joachimmero.herdr-navigator.toggle"
-description = "toggle navigator"
+command = "joachimmero.herdr-navigator.open"
+description = "open navigator"
 ```
 
 The pane opens as a split beside the focused pane, in that pane's directory.
