@@ -17,7 +17,7 @@ the chat.
 
 ## Requirements
 
-- macOS, herdr 0.9.3 or later.
+- macOS or Windows, herdr 0.9.3 or later.
 - `cargo`, to build the plugin. Install it with [rustup](https://rustup.rs); the first build
   fetches the Rust version pinned in `rust-toolchain.toml`.
 
@@ -27,9 +27,11 @@ the chat.
 scripts/link.sh
 ```
 
-That builds the release binary with `cargo`, links `bin/herdr-navigator` to it, puts
-`herdr-navigator` on `PATH` through `~/.local/bin`, and runs `herdr plugin link`. Then bind the
-toggle to a key in herdr's `config.toml`:
+On Windows, run it from Git Bash.
+
+That builds the release binary with `cargo`, puts it at `bin/herdr-navigator` (`.exe` on Windows),
+puts `herdr-navigator` on `PATH` through `~/.local/bin`, and runs `herdr plugin link`. On Windows
+it also adds that folder to the user PATH. Then bind the toggle to a key in herdr's `config.toml`:
 
 ```toml
 [[keys.command]]

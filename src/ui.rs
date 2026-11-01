@@ -633,7 +633,7 @@ fn inset(area: Rect) -> Rect {
 
 /// `path` with the home directory written as `~`.
 fn display_path(path: &Path) -> String {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = crate::herdr::home();
     match home.as_deref().and_then(|home| path.strip_prefix(home).ok()) {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),

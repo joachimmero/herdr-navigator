@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::Duration;
 
 use serde_json::Value;
@@ -48,9 +50,13 @@ pub fn state_dir() -> Result<PathBuf, String> {
     }
     let state = var("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| var("HOME").map(|home| Path::new(&home).join(".local/state")))
-        .ok_or("no plugin state dir: neither HERDR_PLUGIN_STATE_DIR nor HOME is set")?;
+        .or_else(|| home().map(|home| home.join(".local/state")))
+        .ok_or("no plugin state dir: neither HERDR_PLUGIN_STATE_DIR nor a home directory is set")?;
     Ok(state.join("herdr/plugins").join(plugin_id()))
+}
+
+pub fn home() -> Option<PathBuf> {
+    var("HOME").or_else(|| var("USERPROFILE")).map(PathBuf::from)
 }
 
 /// `id` keeping only the characters a file name can safely hold; herdr ids contain `:`.
@@ -114,6 +120,7 @@ fn agents_in(list: &Value, ws: &str, me: Option<&str>, tabs: &HashMap<&str, &str
 /// The largest request herdr reads in time.
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// herdr's read window, plus time to answer.
+#[cfg(unix)]
 const SEND_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Paste `text` into agent `pane`'s input, unsubmitted, in one request, then focus the pane.
@@ -151,13 +158,29 @@ pub fn send(pane: &str, text: &str) -> Result<(), String> {
 
 /// Write `request` as one line to herdr's socket and read the one line it answers.
 fn exchange(socket: &str, request: &str) -> std::io::Result<String> {
-    let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(SEND_TIMEOUT))?;
-    stream.set_write_timeout(Some(SEND_TIMEOUT))?;
+    let mut stream = connect(socket)?;
     stream.write_all(format!("{request}\n").as_bytes())?;
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply)?;
     Ok(reply)
+}
+
+#[cfg(unix)]
+fn connect(socket: &str) -> std::io::Result<impl Read + Write> {
+    let stream = UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(SEND_TIMEOUT))?;
+    stream.set_write_timeout(Some(SEND_TIMEOUT))?;
+    Ok(stream)
+}
+
+#[cfg(windows)]
+fn connect(socket: &str) -> std::io::Result<impl Read + Write> {
+    let path = if socket.starts_with(r"\\.\pipe\") || socket.starts_with(r"\\?\pipe\") {
+        socket.to_owned()
+    } else {
+        format!(r"\\.\pipe\{socket}")
+    };
+    std::fs::OpenOptions::new().read(true).write(true).open(path)
 }
 
 #[cfg(test)]

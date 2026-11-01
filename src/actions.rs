@@ -115,7 +115,7 @@ fn placement(ws: &str, context: &Value, panes: &[Value]) -> Result<(String, Stri
     let cwd = live
         .or_else(|| text(context, "/focused_pane_cwd"))
         .or_else(|| text(context, "/workspace_cwd"))
-        .or_else(|| var("HOME"))
+        .or_else(|| herdr::home().map(|home| home.to_string_lossy().into_owned()))
         .ok_or("no directory to open the pane in")?;
     let target = focused
         .or_else(|| panes.first().and_then(|pane| text(pane, "/pane_id")))
@@ -170,13 +170,19 @@ fn shows_md(pane: &str) -> bool {
         let argv: Vec<&str> =
             process["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         let exe = text(process, "/argv0").or_else(|| argv.first().map(|exe| (*exe).to_owned()));
-        let named =
-            exe.is_some_and(|exe| Path::new(&exe).file_name().is_some_and(|name| name == BINARY));
+        let named = exe.is_some_and(|exe| is_navigator_binary(Path::new(&exe)));
         named && argv.len() <= 1
     })
 }
 
+fn is_navigator_binary(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        name.eq_ignore_ascii_case(BINARY) || name.eq_ignore_ascii_case(BINARY_EXE)
+    })
+}
+
 const BINARY: &str = env!("CARGO_PKG_NAME");
+const BINARY_EXE: &str = concat!(env!("CARGO_PKG_NAME"), ".exe");
 
 /// Names the location a newly opened pane shows first, as `Location::encode` writes it.
 pub const FILE_VAR: &str = "HERDR_NAVIGATOR_FILE";
@@ -203,4 +209,20 @@ fn text(value: &Value, pointer: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn navigator_binary_name_allows_exe() {
+        assert!(is_navigator_binary(Path::new("herdr-navigator")));
+        assert!(is_navigator_binary(Path::new(r"C:\bin\herdr-navigator.exe")));
+        assert!(is_navigator_binary(Path::new(
+            r"\\?\C:\bin\herdr-navigator.EXE"
+        )));
+        assert!(!is_navigator_binary(Path::new("herdr-navigator.cmd")));
+        assert!(!is_navigator_binary(Path::new("other")));
+    }
 }
