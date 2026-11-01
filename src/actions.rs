@@ -56,7 +56,10 @@ fn act(action: Action) -> Result<String, String> {
             open.iter().try_for_each(|pane| herdr::call(&["pane", "close", pane]).map(drop))?;
             Ok(format!("closed {}", open.join(" ")))
         }
-        (Action::Open, false) => Ok(format!("already open ({})", open[0])),
+        (Action::Open, false) => {
+            herdr::call(&["plugin", "pane", "focus", &open[0]]).map(drop)?;
+            Ok(format!("focused {}", open[0]))
+        }
         (Action::Close, true) => Ok("nothing open".into()),
         (Action::Toggle | Action::Open, true) => {
             let (target, cwd) = placement(&ws, &context, &panes)?;
