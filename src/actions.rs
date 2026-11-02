@@ -173,15 +173,16 @@ fn shows_md(pane: &str) -> bool {
         let argv: Vec<&str> =
             process["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         let exe = text(process, "/argv0").or_else(|| argv.first().map(|exe| (*exe).to_owned()));
-        let named = exe.is_some_and(|exe| is_navigator_binary(Path::new(&exe)));
+        let named = exe.is_some_and(|exe| is_navigator_binary(&exe));
         named && argv.len() <= 1
     })
 }
 
-fn is_navigator_binary(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-        name.eq_ignore_ascii_case(BINARY) || name.eq_ignore_ascii_case(BINARY_EXE)
-    })
+/// Whether `exe` names the navigator's binary, taking `\` as a separator on every platform so
+/// a Windows path is read the same anywhere.
+fn is_navigator_binary(exe: &str) -> bool {
+    let name = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
+    name.eq_ignore_ascii_case(BINARY) || name.eq_ignore_ascii_case(BINARY_EXE)
 }
 
 const BINARY: &str = env!("CARGO_PKG_NAME");
@@ -220,12 +221,11 @@ mod tests {
 
     #[test]
     fn navigator_binary_name_allows_exe() {
-        assert!(is_navigator_binary(Path::new("herdr-navigator")));
-        assert!(is_navigator_binary(Path::new(r"C:\bin\herdr-navigator.exe")));
-        assert!(is_navigator_binary(Path::new(
-            r"\\?\C:\bin\herdr-navigator.EXE"
-        )));
-        assert!(!is_navigator_binary(Path::new("herdr-navigator.cmd")));
-        assert!(!is_navigator_binary(Path::new("other")));
+        assert!(is_navigator_binary("herdr-navigator"));
+        assert!(is_navigator_binary("/usr/local/bin/herdr-navigator"));
+        assert!(is_navigator_binary(r"C:\bin\herdr-navigator.exe"));
+        assert!(is_navigator_binary(r"\\?\C:\bin\herdr-navigator.EXE"));
+        assert!(!is_navigator_binary("herdr-navigator.cmd"));
+        assert!(!is_navigator_binary("other"));
     }
 }
