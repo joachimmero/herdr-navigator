@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
@@ -18,7 +18,7 @@ use crate::field::Field;
 use crate::find;
 use crate::herdr::Agent;
 use crate::layout::{self, Lines};
-use crate::picture::{self, Picture, Stage};
+use crate::picture::{self, Stage};
 use crate::search::{CodeHit, Kind, Phase, ResultRow, Search};
 use crate::tree::{Row, Tree};
 
@@ -236,9 +236,8 @@ fn draw_doc(
     area: Rect,
     focused: bool,
 ) -> Vec<Span<'static>> {
-    let missing = doc.is_missing();
-    if let Some(picture) = doc.picture() {
-        return draw_picture(frame, picture, missing, area);
+    if doc.is_image() {
+        return draw_image(frame, doc, comments, composer, area);
     }
     let height = usize::from(area.height);
     let box_height = composer.map_or(0, |composer| composer_height(composer, area));
@@ -298,34 +297,58 @@ fn draw_doc(
     status
 }
 
-/// Draw an image fitted to `area`, or what stands in for it until it's decoded, and return its
-/// part of the title bar's status.
-fn draw_picture(
+/// Draw an image fitted to `area`, or what stands in for it until it's decoded, with its comment
+/// card and the comment box under it, and return its part of the title bar's status.
+fn draw_image(
     frame: &mut Frame,
-    picture: &mut Picture,
-    missing: bool,
+    doc: &mut Doc,
+    comments: &Comments,
+    composer: Option<&Composer>,
     area: Rect,
 ) -> Vec<Span<'static>> {
+    let missing = doc.is_missing();
+    let cards = doc.page(area.width, usize::from(area.height), comments, 0);
+    let box_height = composer.map_or(0, |composer| composer_height(composer, area));
+    let below = u16::try_from(cards.len()).unwrap_or(u16::MAX).saturating_add(box_height);
+    let room = Size::new(area.width, area.height.saturating_sub(below));
+    let Some(picture) = doc.picture() else { return Vec::new() };
+    let notice = match &picture.stage {
+        Stage::Loading(_) => Some("Loading image…".to_owned()),
+        Stage::Ready { .. } => None,
+        Stage::Failed(reason) => Some(format!("Couldn't read this image: {reason}")),
+    };
+    let height = match &notice {
+        Some(notice) => notice.chars().count().div_ceil(usize::from(area.width.max(1))),
+        None => usize::from(picture.fitted(room).height),
+    };
+    let height = u16::try_from(height).unwrap_or(u16::MAX).min(room.height);
+    let shown = Rect { height, ..area };
+    match (&notice, &mut picture.stage) {
+        (Some(notice), _) => {
+            let notice = Line::styled(notice.clone(), dim());
+            frame.render_widget(Paragraph::new(notice).wrap(Wrap { trim: false }), shown);
+        }
+        (None, Stage::Ready { protocol, .. }) => {
+            frame.render_stateful_widget(StatefulImage::default(), shown, &mut **protocol);
+        }
+        (None, _) => {}
+    }
+    let cards_rect = Rect { y: shown.bottom(), height: area.bottom() - shown.bottom(), ..area };
+    let card_rows = u16::try_from(cards.len()).unwrap_or(u16::MAX).min(cards_rect.height);
+    frame.render_widget(Paragraph::new(cards), cards_rect);
+    if let Some(composer) = composer {
+        let y = cards_rect.y + card_rows;
+        let rect = Rect { y, height: box_height.min(area.bottom() - y), ..area };
+        draw_composer(frame, composer, comments, rect);
+    }
+
     let name = picture::format_name(picture.format);
     let label = match picture.size() {
         Some((width, height)) => format!("{name} · {width}×{height}"),
         None => name.to_owned(),
     };
     let missing = missing.then(|| Span::styled("file missing ", Style::new().fg(Color::Red)));
-    let status = missing.into_iter().chain([Span::styled(label, dim())]).collect();
-    match &mut picture.stage {
-        Stage::Loading(_) => {
-            frame.render_widget(Paragraph::new(Line::styled("Loading image…", dim())), area);
-        }
-        Stage::Ready { protocol, .. } => {
-            frame.render_stateful_widget(StatefulImage::default(), area, &mut **protocol);
-        }
-        Stage::Failed(reason) => {
-            let notice = Line::styled(format!("Couldn't read this image: {reason}"), dim());
-            frame.render_widget(Paragraph::new(notice).wrap(Wrap { trim: false }), area);
-        }
-    }
-    status
+    missing.into_iter().chain([Span::styled(label, dim())]).collect()
 }
 
 /// The rows the comment box takes: its text's, between two borders, at most half the file.
@@ -336,8 +359,8 @@ fn composer_height(composer: &Composer, area: Rect) -> u16 {
 
 fn draw_composer(frame: &mut Frame, composer: &Composer, comments: &Comments, area: Rect) {
     let (verb, lines) = match &composer.target {
-        Target::New(comment) => ("comment", Some(comment.lines)),
-        Target::Edit(id) => ("edit", comments.get(*id).map(|comment| comment.lines)),
+        Target::New(comment) => ("comment", comment.anchor.lines()),
+        Target::Edit(id) => ("edit", comments.get(*id).and_then(|comment| comment.anchor.lines())),
     };
     let title = match lines {
         Some(lines) => format!(" {verb} · {} ", lines_label(lines)),

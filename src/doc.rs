@@ -74,6 +74,8 @@ pub struct Doc {
     content: Content,
     /// The file's text, empty for an image or a binary file.
     text: String,
+    /// The file's bytes as `comment::hash` gives them.
+    hash: u64,
     /// What an image is drawn with.
     picker: Picker,
     /// `None` while the file is missing, in which case the content is what it last held.
@@ -107,6 +109,7 @@ impl Doc {
             path,
             content: Content::Binary,
             text: String::new(),
+            hash: 0,
             picker: picker.clone(),
             stamp: None,
             width: 0,
@@ -165,6 +168,10 @@ impl Doc {
         &self.text
     }
 
+    pub fn hash(&self) -> u64 {
+        self.hash
+    }
+
     /// Draw images with `picker` from now on, starting over the one it shows.
     pub fn use_picker(&mut self, picker: &Picker) {
         self.picker = picker.clone();
@@ -186,6 +193,7 @@ impl Doc {
         let source = stamp.and_then(|_| fs::read(&self.path).ok());
         self.stamp = source.as_ref().and(stamp);
         let Some(source) = source else { return false };
+        self.hash = comment::hash(&source);
         (self.content, self.text) = read(&self.path, source, &self.picker);
         self.width = 0;
         true
@@ -373,14 +381,18 @@ impl Doc {
         (end..self.shown.len()).take_while(|&index| self.is_selected(index)).last().unwrap_or(end)
     }
 
-    /// The comment whose card the cursor is on, or else the first on the cursor's lines.
+    /// The comment whose card the cursor is on, or else the first on the cursor's lines, or on
+    /// the whole of an image.
     pub fn comment_at_cursor(&self, comments: &Comments) -> Option<u64> {
         if let Some(Shown::Card { comment, .. }) = self.shown.get(self.cursor) {
             return Some(*comment);
         }
-        let lines = self.source(self.cursor)?;
-        let on_lines = |(_, comment): &(u64, &comment::Comment)| comment.lines.overlaps(lines);
-        comments.in_file(&self.path).into_iter().find(on_lines).map(|(id, _)| id)
+        let lines = self.source(self.cursor);
+        let here = |(_, comment): &(u64, &comment::Comment)| match comment.anchor.lines() {
+            Some(anchor) => lines.is_some_and(|lines| anchor.overlaps(lines)),
+            None => self.is_image(),
+        };
+        comments.in_file(&self.path).into_iter().find(here).map(|(id, _)| id)
     }
 
     /// Move the cursor to a row `query` is found on, wrapping around: for `step` 1 the next after
@@ -540,27 +552,30 @@ impl Doc {
     }
 }
 
-/// `rows` with each comment on `file` carded under the last row of its lines.
+/// `rows` with each comment on `file` carded under the last row of its lines, and a comment on
+/// the whole file after them all.
 fn with_cards(rows: &[Row], file: &Path, comments: &Comments, width: u16) -> Vec<Shown> {
-    let cards: Vec<(usize, u64, Vec<Line<'static>>)> = comments
+    let cards: Vec<(Option<usize>, u64, Vec<Line<'static>>)> = comments
         .in_file(file)
         .into_iter()
         .map(|(id, comment)| {
-            let last = comment.lines.last;
-            let shows = |row: &Row| row.source.is_some_and(|source| source.first <= last);
-            let under = rows.iter().rposition(shows).unwrap_or(rows.len().saturating_sub(1));
+            let under = comment.anchor.lines().map(|Lines { last, .. }| {
+                let shows = |row: &Row| row.source.is_some_and(|source| source.first <= last);
+                rows.iter().rposition(shows).unwrap_or(rows.len().saturating_sub(1))
+            });
             (under, id, comment::card(comment, width))
         })
         .collect();
+    let carded = |under: Option<usize>| {
+        let cards = cards.iter().filter(move |(row, _, _)| *row == under);
+        cards.flat_map(|(_, id, lines)| {
+            lines.iter().map(|line| Shown::Card { comment: *id, line: line.clone() })
+        })
+    };
     rows.iter()
         .enumerate()
-        .flat_map(|(index, _)| {
-            let under = cards.iter().filter(move |(row, _, _)| *row == index);
-            let card_lines = under.flat_map(|(_, id, lines)| {
-                lines.iter().map(|line| Shown::Card { comment: *id, line: line.clone() })
-            });
-            std::iter::once(Shown::Source(index)).chain(card_lines)
-        })
+        .flat_map(|(index, _)| std::iter::once(Shown::Source(index)).chain(carded(Some(index))))
+        .chain(carded(None))
         .collect()
 }
 
@@ -700,6 +715,24 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_on_an_image_cards_on_its_own_and_is_at_the_cursor() {
+        let path = temp("image comment").with_file_name("logo.png");
+        let bytes = picture::png(4, 4);
+        fs::write(&path, &bytes).unwrap();
+        let mut doc = Doc::open(path.clone(), &Picker::halfblocks());
+        let mut comments = Comments::default();
+        comments.add(comment::Comment {
+            file: path,
+            anchor: comment::Anchor::File { hash: comment::hash(&bytes) },
+            text: "bigger".to_owned(),
+            outdated: false,
+        });
+        let page = doc.page(20, 10, &comments, 0);
+        assert_eq!(page.first().map(ToString::to_string).as_deref(), Some("╭ image ───────────╮"));
+        assert!(doc.comment_at_cursor(&comments).is_some());
+    }
+
+    #[test]
     fn scrolling_stops_at_the_last_page_and_takes_the_cursor_along() {
         let path = temp("scroll");
         fs::write(&path, "a\n\nb\n\nc").unwrap();
@@ -785,8 +818,10 @@ mod tests {
         let mut comments = Comments::default();
         comments.add(comment::Comment {
             file: path,
-            lines: Lines { first: 1, last: 2 },
-            snippet: "a\nb".to_owned(),
+            anchor: comment::Anchor::Lines {
+                lines: Lines { first: 1, last: 2 },
+                snippet: "a\nb".to_owned(),
+            },
             text: "hm".to_owned(),
             outdated: false,
         });

@@ -4,6 +4,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use image::ImageFormat;
+use ratatui::layout::Size;
+use ratatui_image::Resize;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::thread::{ResizeRequest, ResizeResponse, ThreadProtocol};
@@ -44,6 +46,8 @@ pub enum Stage {
         width: u32,
         height: u32,
         protocol: Box<ThreadProtocol>,
+        /// The cells it last took, for while the protocol is away being resized.
+        fitted: Size,
     },
     Failed(String),
 }
@@ -83,8 +87,12 @@ impl Picture {
                 (Report::Decoded(Ok(decoded)), Stage::Loading(requests)) => {
                     let protocol =
                         Box::new(ThreadProtocol::new(requests.clone(), Some(decoded.protocol)));
-                    self.stage =
-                        Stage::Ready { width: decoded.width, height: decoded.height, protocol };
+                    self.stage = Stage::Ready {
+                        width: decoded.width,
+                        height: decoded.height,
+                        protocol,
+                        fitted: Size::ZERO,
+                    };
                 }
                 (Report::Resized(Ok(response)), Stage::Ready { protocol, .. }) => {
                     protocol.update_resized_protocol(response);
@@ -95,6 +103,15 @@ impl Picture {
                 _ => {}
             }
         }
+    }
+
+    /// The cells it takes drawn into `room`, none until it's decoded.
+    pub fn fitted(&mut self, room: Size) -> Size {
+        let Stage::Ready { protocol, fitted, .. } = &mut self.stage else { return Size::ZERO };
+        if let Some(size) = protocol.size_for(Resize::Fit(None), room) {
+            *fitted = size;
+        }
+        Size::new(fitted.width.min(room.width), fitted.height.min(room.height))
     }
 
     /// Its width and height in pixels, once decoded.

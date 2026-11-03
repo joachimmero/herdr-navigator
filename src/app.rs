@@ -17,7 +17,7 @@ use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::layout::{Position, Rect};
 use ratatui_image::picker::Picker;
 
-use crate::comment::{self, Comment, Comments};
+use crate::comment::{self, Anchor, Comment, Comments};
 use crate::composer::{Composer, Target};
 use crate::doc::{Doc, Spot};
 use crate::field::Field;
@@ -194,7 +194,7 @@ impl App {
             self.tree.poll();
             if let Some(doc) = &mut self.doc {
                 if doc.refresh() {
-                    self.comments.reanchor(&doc.path, doc.text());
+                    self.comments.reanchor(&doc.path, doc.text(), doc.hash());
                 }
                 doc.poll();
             }
@@ -267,7 +267,7 @@ impl App {
         if !self.doc.as_ref().is_some_and(|doc| doc.path == file) {
             let mut doc = Doc::open(file, self.graphics.picker());
             doc.set_rendered(self.rendered);
-            self.comments.reanchor(&doc.path, doc.text());
+            self.comments.reanchor(&doc.path, doc.text(), doc.hash());
             self.doc = Some(doc);
         }
     }
@@ -466,19 +466,27 @@ impl App {
         }
     }
 
-    /// Start a comment on the selected lines.
+    /// Start a comment on the selected lines, or on the whole of an image, editing the one it
+    /// already has.
     fn compose(&mut self) {
         let Some(doc) = &self.doc else { return };
-        let Some(lines) = doc.selection() else { return };
-        let snippet: Vec<&str> =
-            doc.text().lines().skip(lines.first - 1).take(lines.last - lines.first + 1).collect();
-        let comment = Comment {
-            file: doc.path.clone(),
-            lines,
-            snippet: snippet.join("\n"),
-            text: String::new(),
-            outdated: false,
+        if doc.is_image() && doc.comment_at_cursor(&self.comments).is_some() {
+            return self.edit();
+        }
+        let anchor = if doc.is_image() {
+            Anchor::File { hash: doc.hash() }
+        } else {
+            let Some(lines) = doc.selection() else { return };
+            let snippet: Vec<&str> = doc
+                .text()
+                .lines()
+                .skip(lines.first - 1)
+                .take(lines.last - lines.first + 1)
+                .collect();
+            Anchor::Lines { lines, snippet: snippet.join("\n") }
         };
+        let comment =
+            Comment { file: doc.path.clone(), anchor, text: String::new(), outdated: false };
         self.mode = Mode::Composing(Composer::new(Target::New(comment), String::new()));
     }
 
@@ -532,7 +540,7 @@ impl App {
         let here = self.doc.as_ref().map(|doc| (doc.path.clone(), doc.cursor_line().unwrap_or(0)));
         let sorted = self.comments.sorted();
         let places: Vec<(PathBuf, usize)> =
-            sorted.iter().map(|(_, comment)| (comment.file.clone(), comment.lines.first)).collect();
+            sorted.iter().map(|(_, comment)| (comment.file.clone(), comment.line())).collect();
         let target = match (forward, &here) {
             (true, Some(here)) => places.iter().find(|place| *place > here),
             (false, Some(here)) => places.iter().rev().find(|place| *place < here),
@@ -624,8 +632,8 @@ impl App {
     /// the file now, open or not.
     fn export(&mut self) -> String {
         for file in self.comments.files() {
-            let source = fs::read_to_string(&file).unwrap_or_default();
-            self.comments.reanchor(&file, &source);
+            let bytes = fs::read(&file).unwrap_or_default();
+            self.comments.reanchor(&file, &String::from_utf8_lossy(&bytes), comment::hash(&bytes));
         }
         let sorted = self.comments.sorted();
         let comments: Vec<&Comment> = sorted.iter().map(|(_, comment)| *comment).collect();
@@ -660,9 +668,8 @@ impl App {
     fn on_list_key(&mut self, key: KeyEvent, selected: usize) {
         let sorted = self.comments.sorted();
         let last = sorted.len().saturating_sub(1);
-        let chosen = sorted
-            .get(selected)
-            .map(|(id, comment)| (*id, comment.file.clone(), comment.lines.first));
+        let chosen =
+            sorted.get(selected).map(|(id, comment)| (*id, comment.file.clone(), comment.line()));
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.mode = Mode::List { selected: (selected + 1).min(last) };

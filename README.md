@@ -75,7 +75,7 @@ In a file:
 | `space` / `PgDn`, `PgUp` | Move a page down, up |
 | `g` `G` / `Home` `End` | Go to the top, the bottom |
 | `v` | Start selecting lines at the cursor, or stop |
-| `c` | Comment on the selection, or the cursor's line |
+| `c` | Comment on the selection, the cursor's line, or the whole image |
 | `e` `d` | Edit, delete the comment at the cursor |
 | `n` `N` | Go to the next, previous place the kept find is at, or else comment in any file |
 | `Ctrl+o` `Ctrl+i` | Go back to where a jump left from, forward again |
@@ -160,6 +160,10 @@ When the file changes, each comment follows the lines it quoted to wherever they
 nearest place when they appear more than once. A comment whose lines are gone is marked outdated
 and stays where they last were.
 
+An image takes one comment on the whole picture, in a card under it; `c` writes it, or edits it
+when there already is one. It's marked outdated while the image differs from the one it was
+written on.
+
 `s` pastes every comment into an agent's input in this workspace, without submitting it, and
 focuses that agent so you can add to it. With several agents a picker opens on the one you sent
 to last; `j` `k` or `1`–`9` choose and `⏎` sends. An agent waiting at a prompt refuses the
@@ -175,7 +179,8 @@ Why clear here rather than on resize?
 ```
 
 A comment whose lines are gone is sent with ` (outdated)` after its location and the lines it was
-written on.
+written on. A comment on an image is sent as the image's path, with ` (outdated)` after it when it
+is, then what it says.
 
 ## The tree
 
