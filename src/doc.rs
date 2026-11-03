@@ -7,10 +7,12 @@ use std::time::SystemTime;
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui_image::picker::Picker;
 use unicode_width::UnicodeWidthChar;
 
 use crate::comment::{self, Comments};
 use crate::layout::{self, Lines, Row};
+use crate::picture::{self, Picture};
 use crate::{code, find, highlight, markdown};
 
 /// What a file looked like on disk the last time it was read.
@@ -26,6 +28,7 @@ enum Content {
     Markdown(Vec<Vec<Span<'static>>>),
     /// Each line styled by its grammar.
     Code(Vec<Vec<Span<'static>>>),
+    Image(Picture),
     Binary,
 }
 
@@ -69,8 +72,10 @@ pub struct Spot {
 pub struct Doc {
     pub path: PathBuf,
     content: Content,
-    /// The file's text, empty for a binary file.
+    /// The file's text, empty for an image or a binary file.
     text: String,
+    /// What an image is drawn with.
+    picker: Picker,
     /// `None` while the file is missing, in which case the content is what it last held.
     stamp: Option<Stamp>,
     /// The width `rows` were laid out for, 0 when they need laying out again.
@@ -97,11 +102,12 @@ pub struct Doc {
 }
 
 impl Doc {
-    pub fn open(path: PathBuf) -> Self {
+    pub fn open(path: PathBuf, picker: &Picker) -> Self {
         let mut doc = Self {
             path,
             content: Content::Binary,
             text: String::new(),
+            picker: picker.clone(),
             stamp: None,
             width: 0,
             rows: Vec::new(),
@@ -124,6 +130,24 @@ impl Doc {
         matches!(self.content, Content::Markdown(_))
     }
 
+    pub fn is_image(&self) -> bool {
+        matches!(self.content, Content::Image(_))
+    }
+
+    /// Take in what an image's decoding finished since the last call.
+    pub fn poll(&mut self) {
+        if let Some(picture) = self.picture() {
+            picture.poll();
+        }
+    }
+
+    pub fn picture(&mut self) -> Option<&mut Picture> {
+        match &mut self.content {
+            Content::Image(picture) => Some(picture),
+            _ => None,
+        }
+    }
+
     /// Lay markdown out rendered or as its source from the next layout on, keeping the cursor
     /// on the source line it is on.
     pub fn set_rendered(&mut self, rendered: bool) {
@@ -141,6 +165,16 @@ impl Doc {
         &self.text
     }
 
+    /// Draw images with `picker` from now on, starting over the one it shows.
+    pub fn use_picker(&mut self, picker: &Picker) {
+        self.picker = picker.clone();
+        if self.is_image() {
+            // Forgetting when it was read makes the next refresh read it again.
+            self.stamp = None;
+            self.refresh();
+        }
+    }
+
     /// Reread the file if it changed on disk since it was last read, saying whether it did.
     pub fn refresh(&mut self) -> bool {
         let stamp = fs::metadata(&self.path).ok().and_then(|metadata| {
@@ -152,7 +186,7 @@ impl Doc {
         let source = stamp.and_then(|_| fs::read(&self.path).ok());
         self.stamp = source.as_ref().and(stamp);
         let Some(source) = source else { return false };
-        (self.content, self.text) = read(&self.path, &source);
+        (self.content, self.text) = read(&self.path, source, &self.picker);
         self.width = 0;
         true
     }
@@ -171,6 +205,7 @@ impl Doc {
             self.rows = match &self.content {
                 Content::Markdown(_) if self.rendered => markdown::render(&self.text, width),
                 Content::Markdown(lines) | Content::Code(lines) => code::layout(lines, width),
+                Content::Image(_) => Vec::new(),
                 Content::Binary => vec![Row {
                     line: Line::styled(
                         "Binary file, not shown.",
@@ -538,12 +573,15 @@ fn row_for(rows: &[Row], shown: &[Shown], line: usize) -> usize {
     shown.iter().position(shows).unwrap_or(shown.len().saturating_sub(1))
 }
 
-fn read(path: &Path, bytes: &[u8]) -> (Content, String) {
+fn read(path: &Path, bytes: Vec<u8>, picker: &Picker) -> (Content, String) {
+    if let Some(format) = picture::format(&bytes) {
+        return (Content::Image(Picture::load(bytes, format, picker.clone())), String::new());
+    }
     // Git's test: a NUL among the first 8000 bytes.
     if bytes.iter().take(8000).any(|byte| *byte == 0) {
         return (Content::Binary, String::new());
     }
-    let text = String::from_utf8_lossy(bytes).into_owned();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
     let lines: Vec<&str> = text.lines().collect();
     let styled = highlight::highlight(path, &lines);
     match is_markdown(path) {
@@ -577,7 +615,7 @@ mod tests {
     fn a_drag_copies_from_the_character_it_started_on_to_the_one_it_ended_on() {
         let path = temp("drag");
         fs::write(&path, "alpha beta\n\ngamma delta").unwrap();
-        let mut doc = Doc::open(path);
+        let mut doc = Doc::open(path, &Picker::halfblocks());
         lines(&mut doc, 20);
         doc.press(2, 8, 100);
         doc.drag_to(0, 6, 100);
@@ -594,7 +632,7 @@ mod tests {
     fn markdown_flips_to_its_source_and_back_keeping_the_cursor_on_its_line() {
         let path = temp("flip");
         fs::write(&path, "# Title\n\ntext").unwrap();
-        let mut doc = Doc::open(path);
+        let mut doc = Doc::open(path, &Picker::halfblocks());
         assert_eq!(lines(&mut doc, 20)[0].to_string(), "Title");
         doc.go_to_line(3);
         lines(&mut doc, 20);
@@ -612,7 +650,7 @@ mod tests {
     fn a_change_on_disk_is_picked_up() {
         let path = temp("change");
         fs::write(&path, "one").unwrap();
-        let mut doc = Doc::open(path.clone());
+        let mut doc = Doc::open(path.clone(), &Picker::halfblocks());
         assert_eq!(lines(&mut doc, 20)[0].to_string(), "one");
 
         fs::write(&path, "two words").unwrap();
@@ -624,7 +662,7 @@ mod tests {
     fn a_deleted_file_keeps_its_last_content_until_it_returns() {
         let path = temp("deleted");
         fs::write(&path, "kept").unwrap();
-        let mut doc = Doc::open(path.clone());
+        let mut doc = Doc::open(path.clone(), &Picker::halfblocks());
 
         fs::remove_file(&path).unwrap();
         doc.refresh();
@@ -642,18 +680,30 @@ mod tests {
         let dir = temp("kinds").with_file_name("");
         fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
         fs::write(dir.join("blob.bin"), [0x89, 0, 1]).unwrap();
-        assert_eq!(lines(&mut Doc::open(dir.join("main.rs")), 20)[0].to_string(), "1 fn main() {}");
         assert_eq!(
-            lines(&mut Doc::open(dir.join("blob.bin")), 30)[0].to_string(),
+            lines(&mut Doc::open(dir.join("main.rs"), &Picker::halfblocks()), 20)[0].to_string(),
+            "1 fn main() {}"
+        );
+        assert_eq!(
+            lines(&mut Doc::open(dir.join("blob.bin"), &Picker::halfblocks()), 30)[0].to_string(),
             "Binary file, not shown."
         );
+    }
+
+    #[test]
+    fn an_image_opens_as_a_picture_whatever_its_name() {
+        let path = temp("image").with_file_name("misnamed.txt");
+        fs::write(&path, picture::png(4, 4)).unwrap();
+        let mut doc = Doc::open(path, &Picker::halfblocks());
+        assert!(doc.is_image());
+        assert!(lines(&mut doc, 20).is_empty());
     }
 
     #[test]
     fn scrolling_stops_at_the_last_page_and_takes_the_cursor_along() {
         let path = temp("scroll");
         fs::write(&path, "a\n\nb\n\nc").unwrap();
-        let mut doc = Doc::open(path);
+        let mut doc = Doc::open(path, &Picker::halfblocks());
         doc.build(20, &Comments::default());
         doc.scroll_by(10, 2);
         assert_eq!((doc.scroll, doc.cursor()), (3, 3));
@@ -665,7 +715,7 @@ mod tests {
     fn the_cursor_keeps_its_page_on_screen() {
         let path = temp("cursor").with_file_name("cursor.rs");
         fs::write(&path, "1\n2\n3\n4\n5\n").unwrap();
-        let mut doc = Doc::open(path);
+        let mut doc = Doc::open(path, &Picker::halfblocks());
         doc.build(20, &Comments::default());
         doc.move_cursor(3, 2);
         assert_eq!((doc.cursor(), doc.scroll), (3, 2));
@@ -679,7 +729,7 @@ mod tests {
     fn pointed_lines_come_on_screen_marked_until_the_cursor_leaves_them() {
         let path = temp("point").with_file_name("point.rs");
         fs::write(&path, "1\n2\n3\n4\n5\n6\n7\n8\n").unwrap();
-        let mut doc = Doc::open(path);
+        let mut doc = Doc::open(path, &Picker::halfblocks());
         doc.point(Lines { first: 4, last: 6 });
         doc.page(20, 3, &Comments::default(), 0);
         assert_eq!((doc.cursor(), doc.scroll), (3, 3));
@@ -699,7 +749,7 @@ mod tests {
     fn a_selection_spans_the_source_lines_between_its_ends() {
         let path = temp("select").with_file_name("select.rs");
         fs::write(&path, "one\ntwo\nthree\n").unwrap();
-        let mut doc = Doc::open(path);
+        let mut doc = Doc::open(path, &Picker::halfblocks());
         doc.build(20, &Comments::default());
         assert_eq!(doc.selection(), Some(Lines::one(1)));
         doc.move_cursor(2, 10);
@@ -714,7 +764,7 @@ mod tests {
     fn a_long_lines_continuation_is_selected_with_it_and_a_resize_keeps_the_cursor_on_it() {
         let path = temp("wrap").with_file_name("wrap.rs");
         fs::write(&path, "a\nbbbbbbbb\nc\n").unwrap();
-        let mut doc = Doc::open(path);
+        let mut doc = Doc::open(path, &Picker::halfblocks());
         doc.build(6, &Comments::default());
         doc.move_cursor(3, 10);
         assert_eq!(doc.selection(), Some(Lines::one(3)));
@@ -731,7 +781,7 @@ mod tests {
     fn a_comment_s_card_sits_under_its_last_line_and_the_cursor_can_land_on_it() {
         let path = temp("cards").with_file_name("cards.rs");
         fs::write(&path, "a\nb\nc\n").unwrap();
-        let mut doc = Doc::open(path.clone());
+        let mut doc = Doc::open(path.clone(), &Picker::halfblocks());
         let mut comments = Comments::default();
         comments.add(comment::Comment {
             file: path,

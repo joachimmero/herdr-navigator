@@ -12,6 +12,9 @@ the chat.
 - Markdown shows rendered: headings, emphasis, lists and task lists, quotes, code blocks, rules,
   links (with their target shown), footnotes, and tables, which shrink their columns and wrap
   cells to fit the pane. `m` flips it to its source and back, for every file the pane opens.
+- An image (PNG, JPEG, GIF, WebP, BMP, ICO or TIFF) shows as the picture, shrunk to fit the pane
+  and never enlarged, with its format and size in the title bar. It's drawn with Kitty graphics
+  where the terminal has them, which herdr passes through, and with coloured half-blocks elsewhere.
 - Any other file shows as its source, syntax-highlighted in the terminal's own colors, with line
   numbers. A binary file shows a notice instead.
 
@@ -185,4 +188,5 @@ ignored folder is only read when you open it. Below 70 columns only the tree or 
 
 - Links aren't followed; the tree is the way between files.
 - Code blocks aren't syntax-highlighted.
-- Images show as their alt text, and raw HTML as dim source. HTML comments are hidden.
+- Images in markdown show as their alt text, and raw HTML as dim source. HTML comments are hidden.
+- A GIF shows its first frame, and SVG shows as its source.

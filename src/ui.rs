@@ -6,7 +6,8 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui_image::StatefulImage;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Focus, Mode};
@@ -17,6 +18,7 @@ use crate::field::Field;
 use crate::find;
 use crate::herdr::Agent;
 use crate::layout::{self, Lines};
+use crate::picture::{self, Picture, Stage};
 use crate::search::{CodeHit, Kind, Phase, ResultRow, Search};
 use crate::tree::{Row, Tree};
 
@@ -234,6 +236,10 @@ fn draw_doc(
     area: Rect,
     focused: bool,
 ) -> Vec<Span<'static>> {
+    let missing = doc.is_missing();
+    if let Some(picture) = doc.picture() {
+        return draw_picture(frame, picture, missing, area);
+    }
     let height = usize::from(area.height);
     let box_height = composer.map_or(0, |composer| composer_height(composer, area));
     let lines = doc.page(area.width, height, comments, usize::from(box_height));
@@ -288,6 +294,36 @@ fn draw_doc(
     if total > height {
         let percent = (doc.scroll + height).min(total) * 100 / total;
         status.push(Span::styled(format!("{percent}%"), dim()));
+    }
+    status
+}
+
+/// Draw an image fitted to `area`, or what stands in for it until it's decoded, and return its
+/// part of the title bar's status.
+fn draw_picture(
+    frame: &mut Frame,
+    picture: &mut Picture,
+    missing: bool,
+    area: Rect,
+) -> Vec<Span<'static>> {
+    let name = picture::format_name(picture.format);
+    let label = match picture.size() {
+        Some((width, height)) => format!("{name} · {width}×{height}"),
+        None => name.to_owned(),
+    };
+    let missing = missing.then(|| Span::styled("file missing ", Style::new().fg(Color::Red)));
+    let status = missing.into_iter().chain([Span::styled(label, dim())]).collect();
+    match &mut picture.stage {
+        Stage::Loading(_) => {
+            frame.render_widget(Paragraph::new(Line::styled("Loading image…", dim())), area);
+        }
+        Stage::Ready { protocol, .. } => {
+            frame.render_stateful_widget(StatefulImage::default(), area, &mut **protocol);
+        }
+        Stage::Failed(reason) => {
+            let notice = Line::styled(format!("Couldn't read this image: {reason}"), dim());
+            frame.render_widget(Paragraph::new(notice).wrap(Wrap { trim: false }), area);
+        }
     }
     status
 }

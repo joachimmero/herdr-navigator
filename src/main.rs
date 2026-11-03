@@ -14,6 +14,7 @@ mod jumps;
 mod layout;
 mod location;
 mod markdown;
+mod picture;
 mod search;
 mod tree;
 mod ui;

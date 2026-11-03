@@ -15,6 +15,7 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::layout::{Position, Rect};
+use ratatui_image::picker::Picker;
 
 use crate::comment::{self, Comment, Comments};
 use crate::composer::{Composer, Target};
@@ -69,6 +70,7 @@ pub struct App {
     /// What the last find kept, never empty: marked in every file, and what `n` `N` go to.
     pub found: Option<String>,
     jumps: Jumps,
+    graphics: Graphics,
     /// Whether markdown shows rendered rather than as its source, in every file the pane opens.
     rendered: bool,
     /// Started the first time search opens.
@@ -78,6 +80,32 @@ pub struct App {
     /// Where `herdr-navigator <file>` posts files for this pane; `None` outside herdr.
     inbox: Option<Inbox>,
     quit: bool,
+}
+
+/// What images are drawn with.
+enum Graphics {
+    /// Chosen without the terminal's cell size, which a pane can lack until it has been sized,
+    /// so asked for again once an image shows.
+    Unsized(Picker),
+    Settled(Picker),
+}
+
+impl Graphics {
+    /// Ask the terminal, so only while nothing else is reading its input.
+    fn query() -> Self {
+        match Picker::from_query_stdio() {
+            // Without a cell size the answer is halfblocks, every capability dropped.
+            Ok(picker) if picker.capabilities().is_empty() => Self::Unsized(picker),
+            Ok(picker) => Self::Settled(picker),
+            Err(_) => Self::Settled(Picker::halfblocks()),
+        }
+    }
+
+    fn picker(&self) -> &Picker {
+        match self {
+            Self::Unsized(picker) | Self::Settled(picker) => picker,
+        }
+    }
 }
 
 const TICK: Duration = Duration::from_millis(100);
@@ -95,6 +123,7 @@ pub fn run(location: Option<Location>) -> u8 {
         inbox.take();
     }
     let mut terminal = ratatui::init();
+    let graphics = Graphics::query();
     let _ = execute!(io::stdout(), EnableMouseCapture);
     // Where the terminal can, have it tell keys apart that it otherwise sends alike, like `Tab`
     // and `Ctrl+i`, or `Enter` and `Shift+Enter`.
@@ -103,7 +132,7 @@ pub fn run(location: Option<Location>) -> u8 {
         let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
         let _ = execute!(io::stdout(), PushKeyboardEnhancementFlags(flags));
     }
-    let outcome = App::new(Tree::new(&cwd), inbox, location).run(&mut terminal);
+    let outcome = App::new(Tree::new(&cwd), inbox, location, graphics).run(&mut terminal);
     if enhanced {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
@@ -123,7 +152,12 @@ fn is_quit(key: &KeyEvent) -> bool {
 }
 
 impl App {
-    fn new(mut tree: Tree, inbox: Option<Inbox>, location: Option<Location>) -> Self {
+    fn new(
+        mut tree: Tree,
+        inbox: Option<Inbox>,
+        location: Option<Location>,
+        graphics: Graphics,
+    ) -> Self {
         tree.rescan();
         tree.watch();
         let mut app = Self {
@@ -136,6 +170,7 @@ impl App {
             pending: None,
             found: None,
             jumps: Jumps::default(),
+            graphics,
             rendered: true,
             searcher: None,
             last_sent: None,
@@ -157,12 +192,14 @@ impl App {
                 }
             }
             self.tree.poll();
-            if let Some(doc) = &mut self.doc
-                && doc.refresh()
-            {
-                self.comments.reanchor(&doc.path, doc.text());
+            if let Some(doc) = &mut self.doc {
+                if doc.refresh() {
+                    self.comments.reanchor(&doc.path, doc.text());
+                }
+                doc.poll();
             }
             self.pump_search();
+            self.settle_graphics();
             terminal.draw(|frame| ui::draw(frame, &mut self))?;
             let tick = if matches!(self.mode, Mode::Search(_)) { SEARCH_TICK } else { TICK };
             if event::poll(tick)? {
@@ -186,7 +223,27 @@ impl App {
         if std::mem::take(&mut search.dirty) && !searcher.query(search.field.text.clone()) {
             search.land(Outcome::Failed("search worker unavailable".into()));
         }
-        search.follow_pick(&self.tree.root);
+        search.follow_pick(&self.tree.root, self.graphics.picker());
+        if let Some(preview) = &mut search.preview {
+            preview.poll();
+        }
+    }
+
+    /// Ask the terminal once more what images are drawn with, when its first answer came without
+    /// its cell size and an image is showing, and redraw what shows with the new answer.
+    fn settle_graphics(&mut self) {
+        let Graphics::Unsized(_) = self.graphics else { return };
+        let preview = match &mut self.mode {
+            Mode::Search(search) => search.preview.as_mut(),
+            _ => None,
+        };
+        let mut shown: Vec<&mut Doc> = self.doc.iter_mut().chain(preview).collect();
+        if !shown.iter().any(|doc| doc.is_image()) {
+            return;
+        }
+        let picker = Graphics::query().picker().clone();
+        shown.iter_mut().for_each(|doc| doc.use_picker(&picker));
+        self.graphics = Graphics::Settled(picker);
     }
 
     /// Show `location`'s file, with its lines marked when it names some.
@@ -208,7 +265,7 @@ impl App {
 
     fn open(&mut self, file: PathBuf) {
         if !self.doc.as_ref().is_some_and(|doc| doc.path == file) {
-            let mut doc = Doc::open(file);
+            let mut doc = Doc::open(file, self.graphics.picker());
             doc.set_rendered(self.rendered);
             self.comments.reanchor(&doc.path, doc.text());
             self.doc = Some(doc);
@@ -632,7 +689,7 @@ impl App {
     }
 
     fn open_find(&mut self) {
-        if let Some(doc) = &mut self.doc {
+        if let Some(doc) = self.doc.as_mut().filter(|doc| !doc.is_image()) {
             doc.clear_selection();
             self.focus = Focus::File;
             self.mode = Mode::Find { field: Field::new(String::new()), from: doc.spot() };
@@ -796,7 +853,7 @@ fn on_doc_key(doc: &mut Doc, key: KeyEvent, page: usize) {
         KeyCode::PageUp => doc.page_by(-(page as isize), page),
         KeyCode::Char('g') | KeyCode::Home => doc.move_cursor(isize::MIN, page),
         KeyCode::Char('G') | KeyCode::End => doc.move_cursor(isize::MAX, page),
-        KeyCode::Char('v') => doc.toggle_selection(),
+        KeyCode::Char('v') if !doc.is_image() => doc.toggle_selection(),
         _ => {}
     }
 }

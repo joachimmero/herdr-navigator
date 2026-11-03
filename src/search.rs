@@ -10,6 +10,7 @@ use fff_search::{
     FFFQuery, FilePicker, FilePickerOptions, FileSearchConfig, FrecencyTracker, FuzzySearchOptions,
     GrepSearchOptions, PaginationArgs, SharedFilePicker, SharedFrecency,
 };
+use ratatui_image::picker::Picker;
 
 use crate::doc::Doc;
 use crate::field::Field;
@@ -416,18 +417,18 @@ impl Search {
     }
 
     /// Show the picked result in the preview, its line in the middle for a code hit.
-    pub fn follow_pick(&mut self, root: &Path) {
+    pub fn follow_pick(&mut self, root: &Path, picker: &Picker) {
         let target = self.target().map(|(path, line)| (path.to_owned(), line));
         if target == self.previewed {
             return;
         }
         self.preview = target.as_ref().map(|(path, line)| {
             let file = root.join(path);
-            let Some(line) = *line else { return Doc::open(file) };
+            let Some(line) = *line else { return Doc::open(file, picker) };
             // Another hit in the same file keeps the file as it was read.
             let mut doc = match self.preview.take() {
                 Some(doc) if doc.path == file => doc,
-                _ => Doc::open(file),
+                _ => Doc::open(file, picker),
             };
             doc.point(Lines::one(line));
             doc.center();
