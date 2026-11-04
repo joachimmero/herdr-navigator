@@ -5,7 +5,7 @@ use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui_image::picker::Picker;
 use unicode_width::UnicodeWidthChar;
@@ -101,6 +101,10 @@ pub struct Doc {
     drag: Option<Drag>,
     /// Whether markdown is laid out rendered rather than as its source.
     rendered: bool,
+    /// First body row of a comment being written, its text column, and the inner width.
+    input: Option<(usize, usize, usize)>,
+    /// The draft `shown` was built for, so a keystroke rebuilds the outline.
+    draft_key: Option<(Option<u64>, Option<Lines>, String)>,
 }
 
 impl Doc {
@@ -124,6 +128,8 @@ impl Doc {
             centering: false,
             drag: None,
             rendered: true,
+            input: None,
+            draft_key: None,
         };
         doc.refresh();
         doc
@@ -201,15 +207,20 @@ impl Doc {
 
     /// Lay the file out for `width` columns with `comments`' outlines around their lines, keeping
     /// the cursor and selection on the source lines they were on.
-    pub fn build(&mut self, width: u16, comments: &Comments) {
-        if width == self.width && self.revision == Some(comments.revision()) {
+    pub fn build(&mut self, width: u16, comments: &Comments, draft: Option<comment::Draft<'_>>) {
+        let draft_key =
+            draft.map(|draft| (draft.edit, draft.comment.anchor.lines(), draft.text.to_owned()));
+        if width == self.width
+            && self.revision == Some(comments.revision())
+            && self.draft_key == draft_key
+        {
             return;
         }
         let cursor_line = self.source_line(self.cursor);
         let anchor_line = self.anchor.and_then(|anchor| self.source_line(anchor));
         let cursor_on_screen = self.cursor.saturating_sub(self.scroll);
         self.drag = None;
-        let nests = comment::nests(comments, &self.path);
+        let nests = comment::nests(comments, &self.path, draft);
         let sides = match &self.content {
             Content::Markdown(_) if self.rendered => comment::Sides::Inset,
             Content::Markdown(lines) | Content::Code(lines) => {
@@ -222,7 +233,7 @@ impl Doc {
                 comment::frame_rows(markdown::render(&self.text, width), width, &nests)
             }
             Content::Markdown(lines) | Content::Code(lines) => {
-                code::layout(lines, width, &comment::depths(&nests, lines.len()))
+                code::layout(lines, width, &comment::stacks(&nests, lines.len()))
             }
             Content::Image(_) => Vec::new(),
             Content::Binary => vec![Row {
@@ -236,8 +247,19 @@ impl Doc {
             }],
         };
         self.width = width;
-        self.shown = with_outlines(&self.rows, &self.path, comments, width, &nests, sides);
+        self.input = None;
+        self.shown = with_outlines(
+            &self.rows,
+            &self.path,
+            comments,
+            width,
+            &nests,
+            sides,
+            draft,
+            &mut self.input,
+        );
         self.revision = Some(comments.revision());
+        self.draft_key = draft_key;
         if let Some(line) = cursor_line {
             self.cursor = row_for(&self.rows, &self.shown, line);
             self.scroll = self.cursor.saturating_sub(cursor_on_screen);
@@ -255,8 +277,9 @@ impl Doc {
         height: usize,
         comments: &Comments,
         room: usize,
+        draft: Option<comment::Draft<'_>>,
     ) -> Vec<Line<'static>> {
-        self.build(width, comments);
+        self.build(width, comments, draft);
         if let Some(line) = self.goto.take() {
             self.cursor = row_for(&self.rows, &self.shown, line);
             // Bring as much of the pointed lines on screen as fits under the cursor.
@@ -457,6 +480,11 @@ impl Doc {
         }
     }
 
+    /// The first row of a comment being written, the column its text starts, and its inner width.
+    pub fn input(&self) -> Option<(usize, usize, usize)> {
+        self.input
+    }
+
     /// Put the cursor on the row `offset` rows down the page and start dragging from the
     /// character `column` columns across it.
     pub fn press(&mut self, offset: usize, column: usize, height: usize) {
@@ -575,7 +603,7 @@ impl Doc {
 }
 
 /// `rows` with each line comment outlined around its lines, nested when they overlap, and a
-/// whole-file comment after them all.
+/// whole-file comment after them all. `draft` is the cyan outline of a comment being written.
 fn with_outlines(
     rows: &[Row],
     file: &Path,
@@ -583,50 +611,69 @@ fn with_outlines(
     width: u16,
     nests: &[comment::Nest],
     sides: comment::Sides,
+    draft: Option<comment::Draft<'_>>,
+    input: &mut Option<(usize, usize, usize)>,
 ) -> Vec<Shown> {
     let width_cols = usize::from(width);
+    let draft_id = draft.map(|draft| draft.edit.unwrap_or(comment::DRAFT));
+    let draft_text = draft.map(|draft| draft.text).unwrap_or("");
     let mut shown = Vec::new();
     if !rows.is_empty() {
         let mut flat = Vec::new();
-        flatten(nests, 1, &mut flat);
-        let mut opens: Vec<Vec<(usize, &comment::Nest)>> = vec![Vec::new(); rows.len()];
-        let mut closes: Vec<Vec<(usize, &comment::Nest)>> = vec![Vec::new(); rows.len()];
-        for &(depth, nest) in &flat {
+        flatten(nests, &[], &mut flat);
+        let mut opens: Vec<Vec<(Vec<Color>, &comment::Nest)>> = vec![Vec::new(); rows.len()];
+        let mut closes: Vec<Vec<(Vec<Color>, &comment::Nest)>> = vec![Vec::new(); rows.len()];
+        for (stack, nest) in &flat {
             let (first, last) =
                 comment::band(rows, nest.drawn()).unwrap_or((rows.len() - 1, rows.len() - 1));
-            opens[first].push((depth, nest));
-            closes[last].push((depth, nest));
+            opens[first].push((stack.clone(), nest));
+            closes[last].push((stack.clone(), nest));
         }
         for list in &mut opens {
-            list.sort_by_key(|(depth, _)| *depth);
+            list.sort_by_key(|(stack, _)| stack.len());
         }
         for list in &mut closes {
-            list.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
+            list.sort_by_key(|(stack, _)| std::cmp::Reverse(stack.len()));
         }
-        let emit = |depth: usize, nest: &comment::Nest, line: Line<'static>| Shown::Card {
-            comment: nest.id,
-            line: comment::framed(line, depth, sides),
-        };
         for (index, _) in rows.iter().enumerate() {
-            for &(depth, nest) in &opens[index] {
-                let inner = comment::box_width(sides, depth, width_cols);
-                shown.push(emit(depth, nest, comment::outline_top(nest.comment, inner)));
+            for (stack, nest) in &opens[index] {
+                let inner = comment::box_width(sides, stack.len(), width_cols);
+                let line = comment::outline_top(nest.comment, inner, nest.color);
+                shown.push(Shown::Card {
+                    comment: nest.id,
+                    line: comment::framed(line, &stack[..stack.len() - 1], sides),
+                });
             }
             shown.push(Shown::Source(index));
-            for &(depth, nest) in &closes[index] {
-                let inner = comment::box_width(sides, depth, width_cols);
-                shown.extend(
-                    comment::outline_tail(nest.comment, inner)
-                        .into_iter()
-                        .map(|line| emit(depth, nest, line)),
+            for (stack, nest) in &closes[index] {
+                let inner = comment::box_width(sides, stack.len(), width_cols);
+                let is_draft = draft_id == Some(nest.id);
+                let text = if is_draft { draft_text } else { &nest.comment.text };
+                let tail = comment::outline_tail(
+                    text,
+                    inner,
+                    nest.color,
+                    is_draft && draft_text.is_empty(),
                 );
+                for (line, body) in tail {
+                    if body && is_draft && input.is_none() {
+                        let (left, _) = comment::fills(sides, stack.len() - 1);
+                        *input = Some((shown.len(), left + 2, inner.saturating_sub(4).max(1)));
+                    }
+                    shown.push(Shown::Card {
+                        comment: nest.id,
+                        line: comment::framed(line, &stack[..stack.len() - 1], sides),
+                    });
+                }
             }
         }
     }
     comments
         .in_file(file)
         .into_iter()
-        .filter(|(_, comment)| comment.anchor.lines().is_none())
+        .filter(|(id, comment)| {
+            comment.anchor.lines().is_none() && draft.map(|draft| draft.edit) != Some(Some(*id))
+        })
         .flat_map(|(id, file_comment)| {
             comment::card(file_comment, width)
                 .into_iter()
@@ -638,12 +685,14 @@ fn with_outlines(
 
 fn flatten<'a>(
     nests: &'a [comment::Nest<'a>],
-    depth: usize,
-    out: &mut Vec<(usize, &'a comment::Nest<'a>)>,
+    above: &[Color],
+    out: &mut Vec<(Vec<Color>, &'a comment::Nest<'a>)>,
 ) {
     for nest in nests {
-        out.push((depth, nest));
-        flatten(&nest.children, depth + 1, out);
+        let mut stack = above.to_vec();
+        stack.push(nest.color);
+        out.push((stack.clone(), nest));
+        flatten(&nest.children, &stack, out);
     }
 }
 
@@ -691,7 +740,7 @@ mod tests {
     }
 
     fn lines(doc: &mut Doc, width: u16) -> Vec<Line<'static>> {
-        doc.page(width, 100, &Comments::default(), 0)
+        doc.page(width, 100, &Comments::default(), 0, None)
     }
 
     #[test]
@@ -795,7 +844,7 @@ mod tests {
             text: "bigger".to_owned(),
             outdated: false,
         });
-        let page = doc.page(20, 10, &comments, 0);
+        let page = doc.page(20, 10, &comments, 0, None);
         assert_eq!(page.first().map(ToString::to_string).as_deref(), Some("╭ image ───────────╮"));
         assert!(doc.comment_at_cursor(&comments).is_some());
     }
@@ -805,7 +854,7 @@ mod tests {
         let path = temp("scroll");
         fs::write(&path, "a\n\nb\n\nc").unwrap();
         let mut doc = Doc::open(path, &Picker::halfblocks());
-        doc.build(20, &Comments::default());
+        doc.build(20, &Comments::default(), None);
         doc.scroll_by(10, 2);
         assert_eq!((doc.scroll, doc.cursor()), (3, 3));
         doc.scroll_by(-10, 2);
@@ -817,7 +866,7 @@ mod tests {
         let path = temp("cursor").with_file_name("cursor.rs");
         fs::write(&path, "1\n2\n3\n4\n5\n").unwrap();
         let mut doc = Doc::open(path, &Picker::halfblocks());
-        doc.build(20, &Comments::default());
+        doc.build(20, &Comments::default(), None);
         doc.move_cursor(3, 2);
         assert_eq!((doc.cursor(), doc.scroll), (3, 2));
         doc.move_cursor(10, 2);
@@ -832,17 +881,17 @@ mod tests {
         fs::write(&path, "1\n2\n3\n4\n5\n6\n7\n8\n").unwrap();
         let mut doc = Doc::open(path, &Picker::halfblocks());
         doc.point(Lines { first: 4, last: 6 });
-        doc.page(20, 3, &Comments::default(), 0);
+        doc.page(20, 3, &Comments::default(), 0, None);
         assert_eq!((doc.cursor(), doc.scroll), (3, 3));
         assert_eq!(
             (2..7).map(|index| doc.is_pointed(index)).collect::<Vec<_>>(),
             [false, true, true, true, false]
         );
         doc.move_cursor(2, 3);
-        doc.page(20, 3, &Comments::default(), 0);
+        doc.page(20, 3, &Comments::default(), 0, None);
         assert!(doc.is_pointed(4));
         doc.move_cursor(1, 3);
-        doc.page(20, 3, &Comments::default(), 0);
+        doc.page(20, 3, &Comments::default(), 0, None);
         assert!(!doc.is_pointed(4));
     }
 
@@ -851,7 +900,7 @@ mod tests {
         let path = temp("select").with_file_name("select.rs");
         fs::write(&path, "one\ntwo\nthree\n").unwrap();
         let mut doc = Doc::open(path, &Picker::halfblocks());
-        doc.build(20, &Comments::default());
+        doc.build(20, &Comments::default(), None);
         assert_eq!(doc.selection(), Some(Lines::one(1)));
         doc.move_cursor(2, 10);
         doc.toggle_selection();
@@ -866,14 +915,14 @@ mod tests {
         let path = temp("wrap").with_file_name("wrap.rs");
         fs::write(&path, "a\nbbbbbbbb\nc\n").unwrap();
         let mut doc = Doc::open(path, &Picker::halfblocks());
-        doc.build(6, &Comments::default());
+        doc.build(6, &Comments::default(), None);
         doc.move_cursor(3, 10);
         assert_eq!(doc.selection(), Some(Lines::one(3)));
         doc.move_cursor(-2, 10);
         assert_eq!(doc.selection(), Some(Lines::one(2)));
         assert!(doc.is_selected(1) && doc.is_selected(2) && !doc.is_selected(3));
 
-        doc.build(20, &Comments::default());
+        doc.build(20, &Comments::default(), None);
         assert_eq!(doc.cursor(), 1);
         assert_eq!(doc.selection(), Some(Lines::one(2)));
     }
@@ -894,7 +943,7 @@ mod tests {
             outdated: false,
         });
         let shown: Vec<String> =
-            doc.page(12, 10, &comments, 0).iter().map(Line::to_string).collect();
+            doc.page(12, 10, &comments, 0, None).iter().map(Line::to_string).collect();
         assert_eq!(
             shown,
             [
@@ -933,10 +982,45 @@ mod tests {
             outdated: false,
         });
         let shown: Vec<String> =
-            doc.page(12, 10, &comments, 0).iter().map(Line::to_string).collect();
+            doc.page(12, 10, &comments, 0, None).iter().map(Line::to_string).collect();
         assert_eq!(shown[0], "╭ L1 ──────╮");
         assert!(shown.iter().any(|row| row.starts_with("│ hello")));
         assert!(shown.iter().any(|row| row.contains("hi")));
         assert!(shown.iter().any(|row| row == "world"));
+    }
+
+    #[test]
+    fn a_draft_comment_outlines_its_lines_before_it_is_saved() {
+        let path = temp("draft").with_file_name("draft.rs");
+        fs::write(&path, "a\nb\nc\n").unwrap();
+        let mut doc = Doc::open(path.clone(), &Picker::halfblocks());
+        let draft_comment = comment::Comment {
+            file: path,
+            anchor: comment::Anchor::Lines {
+                lines: Lines { first: 1, last: 2 },
+                snippet: "a\nb".to_owned(),
+            },
+            text: String::new(),
+            outdated: false,
+        };
+        let draft = comment::Draft { comment: &draft_comment, text: "hi", edit: None };
+        let shown: Vec<String> = doc
+            .page(12, 10, &Comments::default(), 0, Some(draft))
+            .iter()
+            .map(Line::to_string)
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "╭ L1–2 ────╮",
+                "│ a        │",
+                "│ b        │",
+                "├──────────┤",
+                "│ hi       │",
+                "╰──────────╯",
+                "3 c",
+            ]
+        );
+        assert!(doc.input().is_some());
     }
 }

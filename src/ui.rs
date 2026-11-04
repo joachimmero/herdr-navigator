@@ -241,8 +241,9 @@ fn draw_doc(
         return draw_image(frame, doc, comments, composer, area);
     }
     let height = usize::from(area.height);
+    let draft = composer.and_then(|composer| line_draft(composer, comments));
     let box_height = composer.map_or(0, |composer| composer_height(composer, area));
-    let lines = doc.page(area.width, height, comments, usize::from(box_height));
+    let lines = doc.page(area.width, height, comments, usize::from(box_height), draft);
     let lines: Vec<Line> = (doc.scroll..)
         .zip(lines)
         .map(|(index, line)| {
@@ -278,10 +279,22 @@ fn draw_doc(
         }
     }
     if let Some(composer) = composer {
-        let below = u16::try_from(doc.selection_end() + 1 - doc.scroll).unwrap_or(u16::MAX);
-        let y = area.y.saturating_add(below).min(area.bottom().saturating_sub(box_height));
-        let rect = Rect { y, height: box_height.min(area.bottom() - y), ..area };
-        draw_composer(frame, composer, comments, rect);
+        if draft.is_none() {
+            let below = u16::try_from(doc.selection_end() + 1 - doc.scroll).unwrap_or(u16::MAX);
+            let y = area.y.saturating_add(below).min(area.bottom().saturating_sub(box_height));
+            let rect = Rect { y, height: box_height.min(area.bottom() - y), ..area };
+            draw_composer(frame, composer, comments, rect);
+        } else if let Some((row, x, inner)) = doc.input() {
+            let (_, (caret_row, caret_col)) = composer.field.rows(inner);
+            let at = row.saturating_add(caret_row);
+            if at >= doc.scroll {
+                let y = area.y.saturating_add(u16::try_from(at - doc.scroll).unwrap_or(u16::MAX));
+                let x = area.x.saturating_add(u16::try_from(x + caret_col).unwrap_or(u16::MAX));
+                if y < area.bottom() && x < area.right() {
+                    frame.set_cursor_position((x, y));
+                }
+            }
+        }
     }
 
     let cursor_color =
@@ -331,7 +344,17 @@ fn draw_image(
     area: Rect,
 ) -> Vec<Span<'static>> {
     let missing = doc.is_missing();
-    let cards = doc.page(area.width, usize::from(area.height), comments, 0);
+    let draft = composer.and_then(|composer| match &composer.target {
+        Target::New(comment) => {
+            Some(comment::Draft { comment, text: &composer.field.text, edit: None })
+        }
+        Target::Edit(id) => comments.get(*id).map(|comment| comment::Draft {
+            comment,
+            text: &composer.field.text,
+            edit: Some(*id),
+        }),
+    });
+    let cards = doc.page(area.width, usize::from(area.height), comments, 0, draft);
     let box_height = composer.map_or(0, |composer| composer_height(composer, area));
     let below = u16::try_from(cards.len()).unwrap_or(u16::MAX).saturating_add(box_height);
     let room = Size::new(area.width, area.height.saturating_sub(below));
@@ -376,6 +399,15 @@ fn draw_image(
 }
 
 /// The rows the comment box takes: its text's, between two borders, at most half the file.
+fn line_draft<'a>(composer: &'a Composer, comments: &'a Comments) -> Option<comment::Draft<'a>> {
+    let (comment, edit) = match &composer.target {
+        Target::New(comment) => (comment, None),
+        Target::Edit(id) => (comments.get(*id)?, Some(*id)),
+    };
+    comment.anchor.lines()?;
+    Some(comment::Draft { comment, text: &composer.field.text, edit })
+}
+
 fn composer_height(composer: &Composer, area: Rect) -> u16 {
     let rows = composer.field.rows(usize::from(area.width.saturating_sub(2))).0.len();
     u16::try_from(rows + 2).unwrap_or(u16::MAX).min((area.height / 2).max(3))

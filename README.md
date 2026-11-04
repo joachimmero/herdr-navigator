@@ -152,7 +152,7 @@ from search rank higher in later ones.
 
 ## Comments
 
-A comment outlines the lines it's on, with its text under them in the same box, and stays for the session. In the comment box,
+A comment outlines the lines it's on, with its text under them in the same box, and stays for the session. While writing, the box is cyan. In the comment box,
 `⏎` saves, `Shift+⏎`, `Alt+⏎` or `Ctrl+j` starts a new line, and `Esc` cancels; saving an empty
 box cancels too. In the list, `j` `k` move, `⏎` jumps to the comment, `d` deletes it, and `Esc`
 or `l` closes the list.

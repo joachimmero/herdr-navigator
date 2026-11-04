@@ -1,6 +1,6 @@
 //! Source text laid out for the pane: a line-number gutter, and lines wrapped hard to the width.
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::comment;
@@ -8,9 +8,9 @@ use crate::layout::{self, Lines, Row};
 
 const TAB: &str = "    ";
 
-/// `lines`, already styled, laid out for `width` columns. `depths[i]` is how many comment boxes
-/// enclose source line `i + 1`; missing entries are 0.
-pub fn layout(lines: &[Vec<Span<'static>>], width: u16, depths: &[usize]) -> Vec<Row> {
+/// `lines`, already styled, laid out for `width` columns. `stacks[i]` is the wall colors
+/// enclosing source line `i + 1`, outer first; missing entries are none.
+pub fn layout(lines: &[Vec<Span<'static>>], width: u16, stacks: &[Vec<Color>]) -> Vec<Row> {
     let digits = lines.len().max(1).to_string().len();
     let gutter = digits + 1;
     let width = usize::from(width);
@@ -18,7 +18,9 @@ pub fn layout(lines: &[Vec<Span<'static>>], width: u16, depths: &[usize]) -> Vec
         .iter()
         .enumerate()
         .flat_map(|(index, spans)| {
-            let depth = depths.get(index).copied().unwrap_or(0);
+            let empty: Vec<Color> = Vec::new();
+            let colors = stacks.get(index).unwrap_or(&empty);
+            let depth = colors.len();
             let (left_fill, right_fill) = comment::fills(comment::Sides::Gutter(gutter), depth);
             let text_width = if depth == 0 {
                 width.saturating_sub(gutter).max(1)
@@ -29,10 +31,11 @@ pub fn layout(lines: &[Vec<Span<'static>>], width: u16, depths: &[usize]) -> Vec
                 .iter()
                 .map(|span| Span::styled(span.content.replace('\t', TAB), span.style))
                 .collect();
+            let colors = colors.clone();
             layout::wrap_spans(&expanded, text_width).into_iter().enumerate().map(
                 move |(row, spans)| {
                     let source = Some(Lines::one(index + 1));
-                    if depth == 0 {
+                    if colors.is_empty() {
                         let number = if row == 0 {
                             format!("{:>digits$} ", index + 1)
                         } else {
@@ -46,7 +49,7 @@ pub fn layout(lines: &[Vec<Span<'static>>], width: u16, depths: &[usize]) -> Vec
                             trail: 0,
                         };
                     }
-                    comment::box_row(spans, depth, left_fill, text_width, source)
+                    comment::box_row(spans, &colors, left_fill, text_width, source)
                 },
             )
         })
@@ -86,7 +89,7 @@ mod tests {
     #[test]
     fn a_commented_line_replaces_the_gutter_with_a_wall_and_wraps_inside() {
         let lines = [vec![Span::raw("abcdef")], vec![Span::raw("x")]];
-        let laid = layout(&lines, 8, &[1, 0]);
+        let laid = layout(&lines, 8, &[vec![Color::Yellow], vec![]]);
         assert_eq!(text(&laid), ["│ abcd │", "│ ef   │", "2 x"]);
     }
 }
