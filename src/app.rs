@@ -488,6 +488,9 @@ impl App {
         let comment =
             Comment { file: doc.path.clone(), anchor, text: String::new(), outdated: false };
         self.mode = Mode::Composing(Composer::new(Target::New(comment), String::new()));
+        if let Some(doc) = &mut self.doc {
+            doc.clear_selection();
+        }
     }
 
     /// Edit the comment at the cursor.
@@ -498,6 +501,9 @@ impl App {
         };
         let text = self.comments.get(id).map(|comment| comment.text.clone()).unwrap_or_default();
         self.mode = Mode::Composing(Composer::new(Target::Edit(id), text));
+        if let Some(doc) = &mut self.doc {
+            doc.clear_selection();
+        }
     }
 
     /// Close the comment box, writing what it holds when `save` and it holds anything.
@@ -510,12 +516,7 @@ impl App {
             return;
         }
         match composer.target {
-            Target::New(comment) => {
-                self.comments.add(Comment { text, ..comment });
-                if let Some(doc) = &mut self.doc {
-                    doc.clear_selection();
-                }
-            }
+            Target::New(comment) => self.comments.add(Comment { text, ..comment }),
             Target::Edit(id) => self.comments.set_text(id, text),
         }
     }
@@ -871,5 +872,86 @@ fn pbcopy(text: &str) -> io::Result<()> {
     match child.wait()? {
         status if status.success() => Ok(()),
         status => Err(io::Error::other(format!("pbcopy {status}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    fn app_with_file(name: &str, text: &str) -> App {
+        let dir =
+            std::env::temp_dir().join(format!("herdr-navigator-app-{}-{name}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, text).unwrap();
+        let mut app = App {
+            tree: Tree::new(Path::new(".")),
+            doc: Some(Doc::open(path, &Picker::halfblocks())),
+            focus: Focus::File,
+            comments: Comments::default(),
+            mode: Mode::Browse,
+            notice: None,
+            pending: None,
+            found: None,
+            jumps: Jumps::default(),
+            graphics: Graphics::Settled(Picker::halfblocks()),
+            rendered: true,
+            searcher: None,
+            last_sent: None,
+            inbox: None,
+            quit: false,
+        };
+        if let Some(doc) = &mut app.doc {
+            doc.build(40, &app.comments, None);
+        }
+        app
+    }
+
+    #[test]
+    fn starting_a_comment_drops_the_selection() {
+        let mut app = app_with_file("new.rs", "one\ntwo\nthree\n");
+        let doc = app.doc.as_mut().unwrap();
+        doc.toggle_selection();
+        doc.move_cursor(1, 10);
+        assert!(doc.is_selecting());
+        app.compose();
+        assert!(matches!(app.mode, Mode::Composing(_)));
+        assert!(!app.doc.as_ref().unwrap().is_selecting());
+    }
+
+    #[test]
+    fn editing_a_comment_drops_the_selection() {
+        let mut app = app_with_file("edit.rs", "one\ntwo\nthree\n");
+        let file = app.doc.as_ref().unwrap().path.clone();
+        app.comments.add(Comment {
+            file,
+            anchor: Anchor::Lines { lines: Lines::one(1), snippet: "one".into() },
+            text: "note".into(),
+            outdated: false,
+        });
+        let doc = app.doc.as_mut().unwrap();
+        doc.build(40, &app.comments, None);
+        doc.move_cursor(1, 10);
+        doc.toggle_selection();
+        doc.move_cursor(-1, 10);
+        assert!(doc.is_selecting());
+        assert_eq!(doc.comment_at_cursor(&app.comments), Some(0));
+        app.edit();
+        assert!(matches!(app.mode, Mode::Composing(_)));
+        assert!(!app.doc.as_ref().unwrap().is_selecting());
+    }
+
+    #[test]
+    fn editing_with_no_comment_leaves_the_selection() {
+        let mut app = app_with_file("none.rs", "one\ntwo\n");
+        let doc = app.doc.as_mut().unwrap();
+        doc.toggle_selection();
+        doc.move_cursor(1, 10);
+        app.edit();
+        assert!(matches!(app.mode, Mode::Browse));
+        assert!(app.doc.as_ref().unwrap().is_selecting());
     }
 }

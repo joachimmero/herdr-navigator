@@ -109,7 +109,8 @@ In the tree:
 
 A selection fills its source rows across the pane. The cursor and the selection are marked in
 the margin, and the title bar shows the source lines they cover, so in rendered markdown you can
-see which lines of the file a paragraph came from.
+see which lines of the file a paragraph came from. `c` and `e` drop the selection when the
+comment box opens.
 
 Dragging over the file copies the text as it's shown, without line numbers or bullets, a line
 break at the end of each row on screen. Dragging past the top or bottom scrolls. The copied text
@@ -152,7 +153,7 @@ from search rank higher in later ones.
 
 ## Comments
 
-A comment outlines the lines it's on, with its text under them in the same box, and stays for the session. While writing, the box is cyan. In the comment box,
+A comment outlines the lines it's on, with its text under them in the same box, and stays for the session. While writing, the box is cyan, and the selection is gone. In the comment box,
 `⏎` saves, `Shift+⏎`, `Alt+⏎` or `Ctrl+j` starts a new line, and `Esc` cancels; saving an empty
 box cancels too. In the list, `j` `k` move, `⏎` jumps to the comment, `d` deletes it, and `Esc`
 or `l` closes the list.

@@ -270,7 +270,7 @@ impl Doc {
     }
 
     /// The rows on screen in a page `width` columns by `height` rows, scrolled to keep the
-    /// cursor on it and `room` rows free under the selection.
+    /// cursor on it and `room` rows free under a comment being written, or the selection.
     pub fn page(
         &mut self,
         width: u16,
@@ -297,7 +297,9 @@ impl Doc {
         }
         if room > 0 {
             let room = room.min(height.saturating_sub(1));
-            self.scroll = self.scroll.max((self.selection_end() + 1 + room).saturating_sub(height));
+            let after =
+                self.input.map_or(self.selection_end() + 1, |(row, _, _)| row.saturating_sub(1));
+            self.scroll = self.scroll.max((after + room).saturating_sub(height));
         }
         let end = (self.scroll + height).min(self.shown.len());
         (self.scroll..end).map(|index| self.line(index).clone()).collect()
@@ -1022,5 +1024,27 @@ mod tests {
             ]
         );
         assert!(doc.input().is_some());
+    }
+
+    #[test]
+    fn a_draft_keeps_its_text_on_screen_without_a_selection() {
+        let path = temp("draft-scroll").with_file_name("draft.rs");
+        let source: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        fs::write(&path, &source).unwrap();
+        let mut doc = Doc::open(path.clone(), &Picker::halfblocks());
+        doc.build(20, &Comments::default(), None);
+        let draft_comment = comment::Comment {
+            file: path,
+            anchor: comment::Anchor::Lines {
+                lines: Lines { first: 1, last: 15 },
+                snippet: source.lines().take(15).collect::<Vec<_>>().join("\n"),
+            },
+            text: String::new(),
+            outdated: false,
+        };
+        let draft = comment::Draft { comment: &draft_comment, text: "hi", edit: None };
+        doc.page(20, 8, &Comments::default(), 3, Some(draft));
+        let (row, _, _) = doc.input().expect("draft body");
+        assert!(row >= doc.scroll && row < doc.scroll + 8);
     }
 }
