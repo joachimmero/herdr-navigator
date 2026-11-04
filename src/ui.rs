@@ -282,10 +282,15 @@ fn draw_doc(
         draw_composer(frame, composer, comments, rect);
     }
 
-    let cursor_bar = if focused {
-        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    let cursor_color = if doc.comment_at_cursor(comments).is_some() {
+        Color::Yellow
     } else {
-        Style::new().fg(Color::Cyan).add_modifier(Modifier::DIM)
+        Color::Cyan
+    };
+    let cursor_bar = if focused {
+        Style::new().fg(cursor_color).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(cursor_color).add_modifier(Modifier::DIM)
     };
     let selection_bar = if focused { Style::new() } else { dim() };
     let pointed = Style::new().fg(Color::Magenta);
