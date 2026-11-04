@@ -247,14 +247,16 @@ fn draw_doc(
         .zip(lines)
         .map(|(index, line)| {
             let Some(chrome) = doc.chrome(index) else { return line };
+            let trail = doc.trail(index).unwrap_or(0);
             let line = match find {
-                Some(query) => find::highlight(line, chrome, query),
+                Some(query) => find::highlight(line, chrome, trail, query),
                 None => line,
             };
             let dragged = doc.dragged(index);
             layout::mark(
                 line,
                 chrome,
+                trail,
                 dragged.as_slice(),
                 Style::new().add_modifier(Modifier::REVERSED),
             )
@@ -282,11 +284,8 @@ fn draw_doc(
         draw_composer(frame, composer, comments, rect);
     }
 
-    let cursor_color = if doc.comment_at_cursor(comments).is_some() {
-        Color::Yellow
-    } else {
-        Color::Cyan
-    };
+    let cursor_color =
+        if doc.comment_at_cursor(comments).is_some() { Color::Yellow } else { Color::Cyan };
     let cursor_bar = if focused {
         Style::new().fg(cursor_color).add_modifier(Modifier::BOLD)
     } else {

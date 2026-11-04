@@ -38,10 +38,11 @@ pub fn ranges(text: &str, query: &str) -> Vec<Range<usize>> {
     found
 }
 
-/// `line` with `query` marked wherever it is found past the first `chrome` spans.
-pub fn highlight(line: Line<'static>, chrome: usize, query: &str) -> Line<'static> {
-    let found = ranges(&layout::text(&line, chrome), query);
-    layout::mark(line, chrome, &found, MATCH)
+/// `line` with `query` marked wherever it is found past the first `chrome` spans and before its
+/// last `trail` spans.
+pub fn highlight(line: Line<'static>, chrome: usize, trail: usize, query: &str) -> Line<'static> {
+    let found = ranges(&layout::text(&line, chrome, trail), query);
+    layout::mark(line, chrome, trail, &found, MATCH)
 }
 
 #[cfg(test)]
@@ -62,7 +63,7 @@ mod tests {
     #[test]
     fn highlighting_splits_spans_at_the_match_and_skips_the_chrome() {
         let line = Line::from(vec![Span::raw("12 "), Span::raw("a1"), Span::raw("2b")]);
-        let lit = highlight(line, 1, "12");
+        let lit = highlight(line, 1, 0, "12");
         let pieces: Vec<(&str, bool)> =
             lit.spans.iter().map(|span| (&*span.content, span.style == MATCH)).collect();
         assert_eq!(pieces, [("12 ", false), ("a", false), ("1", true), ("2", true), ("b", false)]);

@@ -368,7 +368,7 @@ impl Renderer {
                 prefix.pop();
             }
             let chrome = prefix.len();
-            self.rows.push(Row { line: Line::from(prefix), source: None, chrome });
+            self.rows.push(Row { line: Line::from(prefix), source: None, chrome, trail: 0 });
         }
         self.gap = false;
     }
@@ -387,7 +387,12 @@ impl Renderer {
             .collect();
         self.containers.iter_mut().for_each(|container| container.first_pending = false);
         let chrome = prefix.len();
-        self.rows.push(Row { line: Line::from([prefix, content].concat()), source, chrome });
+        self.rows.push(Row {
+            line: Line::from([prefix, content].concat()),
+            source,
+            chrome,
+            trail: 0,
+        });
     }
 
     /// Text a tight list item holds without a paragraph around it, which unlike a paragraph

@@ -1,4 +1,4 @@
-//! The file the pane shows, kept in step with the disk, with its comments' cards among its rows.
+//! The file the pane shows, kept in step with the disk, with its comments' outlines among its rows.
 
 use std::fs;
 use std::ops::{Range, RangeInclusive};
@@ -56,7 +56,7 @@ impl Drag {
     }
 }
 
-/// One row on screen: one of the file's rows, or a line of a comment's card under them.
+/// One row on screen: one of the file's rows, or a line of a comment's outline.
 enum Shown {
     Source(usize),
     Card { comment: u64, line: Line<'static> },
@@ -199,7 +199,7 @@ impl Doc {
         true
     }
 
-    /// Lay the file out for `width` columns with `comments`' cards under their lines, keeping
+    /// Lay the file out for `width` columns with `comments`' outlines around their lines, keeping
     /// the cursor and selection on the source lines they were on.
     pub fn build(&mut self, width: u16, comments: &Comments) {
         if width == self.width && self.revision == Some(comments.revision()) {
@@ -209,23 +209,34 @@ impl Doc {
         let anchor_line = self.anchor.and_then(|anchor| self.source_line(anchor));
         let cursor_on_screen = self.cursor.saturating_sub(self.scroll);
         self.drag = None;
-        if width != self.width {
-            self.rows = match &self.content {
-                Content::Markdown(_) if self.rendered => markdown::render(&self.text, width),
-                Content::Markdown(lines) | Content::Code(lines) => code::layout(lines, width),
-                Content::Image(_) => Vec::new(),
-                Content::Binary => vec![Row {
-                    line: Line::styled(
-                        "Binary file, not shown.",
-                        Style::new().add_modifier(Modifier::DIM),
-                    ),
-                    source: None,
-                    chrome: 1,
-                }],
-            };
-            self.width = width;
-        }
-        self.shown = with_cards(&self.rows, &self.path, comments, width);
+        let nests = comment::nests(comments, &self.path);
+        let sides = match &self.content {
+            Content::Markdown(_) if self.rendered => comment::Sides::Inset,
+            Content::Markdown(lines) | Content::Code(lines) => {
+                comment::Sides::Gutter(lines.len().max(1).to_string().len() + 1)
+            }
+            _ => comment::Sides::Inset,
+        };
+        self.rows = match &self.content {
+            Content::Markdown(_) if self.rendered => {
+                comment::frame_rows(markdown::render(&self.text, width), width, &nests)
+            }
+            Content::Markdown(lines) | Content::Code(lines) => {
+                code::layout(lines, width, &comment::depths(&nests, lines.len()))
+            }
+            Content::Image(_) => Vec::new(),
+            Content::Binary => vec![Row {
+                line: Line::styled(
+                    "Binary file, not shown.",
+                    Style::new().add_modifier(Modifier::DIM),
+                ),
+                source: None,
+                chrome: 1,
+                trail: 0,
+            }],
+        };
+        self.width = width;
+        self.shown = with_outlines(&self.rows, &self.path, comments, width, &nests, sides);
         self.revision = Some(comments.revision());
         if let Some(line) = cursor_line {
             self.cursor = row_for(&self.rows, &self.shown, line);
@@ -422,7 +433,9 @@ impl Doc {
     /// The rows of the file, cards aside, whose text holds `query`.
     fn found_rows(&self, query: &str) -> Vec<usize> {
         let holds = |index: &usize| {
-            let text = self.chrome(*index).map(|chrome| layout::text(self.line(*index), chrome));
+            let text = self.chrome(*index).map(|chrome| {
+                layout::text(self.line(*index), chrome, self.trail(*index).unwrap_or(0))
+            });
             text.is_some_and(|text| !find::ranges(&text, query).is_empty())
         };
         (0..self.shown.len()).filter(holds).collect()
@@ -432,6 +445,14 @@ impl Doc {
     pub fn chrome(&self, index: usize) -> Option<usize> {
         match self.shown.get(index)? {
             Shown::Source(row) => Some(self.rows[*row].chrome),
+            Shown::Card { .. } => None,
+        }
+    }
+
+    /// How many spans trail row `index` without being the file's text; `None` for a card's row.
+    pub fn trail(&self, index: usize) -> Option<usize> {
+        match self.shown.get(index)? {
+            Shown::Source(row) => Some(self.rows[*row].trail),
             Shown::Card { .. } => None,
         }
     }
@@ -502,8 +523,9 @@ impl Doc {
         let chrome = self.chrome(index)?;
         let line = self.line(index);
         let margin: usize = line.spans.iter().take(chrome).map(Span::width).sum();
+        let trail = self.trail(index).unwrap_or(0);
         let widths: Vec<usize> =
-            layout::text(line, chrome).chars().map(|ch| ch.width().unwrap_or(0)).collect();
+            layout::text(line, chrome, trail).chars().map(|ch| ch.width().unwrap_or(0)).collect();
         let mut left = column.saturating_sub(margin);
         let under = widths.iter().position(|&width| {
             let here = left < width;
@@ -515,7 +537,7 @@ impl Doc {
 
     /// Row `index`'s text past its line number or bullet; `None` for a card's row.
     fn text_of(&self, index: usize) -> Option<String> {
-        Some(layout::text(self.line(index), self.chrome(index)?))
+        Some(layout::text(self.line(index), self.chrome(index)?, self.trail(index).unwrap_or(0)))
     }
 
     fn selected_rows(&self) -> RangeInclusive<usize> {
@@ -552,31 +574,77 @@ impl Doc {
     }
 }
 
-/// `rows` with each comment on `file` carded under the last row of its lines, and a comment on
-/// the whole file after them all.
-fn with_cards(rows: &[Row], file: &Path, comments: &Comments, width: u16) -> Vec<Shown> {
-    let cards: Vec<(Option<usize>, u64, Vec<Line<'static>>)> = comments
+/// `rows` with each line comment outlined around its lines, nested when they overlap, and a
+/// whole-file comment after them all.
+fn with_outlines(
+    rows: &[Row],
+    file: &Path,
+    comments: &Comments,
+    width: u16,
+    nests: &[comment::Nest],
+    sides: comment::Sides,
+) -> Vec<Shown> {
+    let width_cols = usize::from(width);
+    let mut shown = Vec::new();
+    if !rows.is_empty() {
+        let mut flat = Vec::new();
+        flatten(nests, 1, &mut flat);
+        let mut opens: Vec<Vec<(usize, &comment::Nest)>> = vec![Vec::new(); rows.len()];
+        let mut closes: Vec<Vec<(usize, &comment::Nest)>> = vec![Vec::new(); rows.len()];
+        for &(depth, nest) in &flat {
+            let (first, last) =
+                comment::band(rows, nest.drawn()).unwrap_or((rows.len() - 1, rows.len() - 1));
+            opens[first].push((depth, nest));
+            closes[last].push((depth, nest));
+        }
+        for list in &mut opens {
+            list.sort_by_key(|(depth, _)| *depth);
+        }
+        for list in &mut closes {
+            list.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
+        }
+        let emit = |depth: usize, nest: &comment::Nest, line: Line<'static>| Shown::Card {
+            comment: nest.id,
+            line: comment::framed(line, depth, sides),
+        };
+        for (index, _) in rows.iter().enumerate() {
+            for &(depth, nest) in &opens[index] {
+                let inner = comment::box_width(sides, depth, width_cols);
+                shown.push(emit(depth, nest, comment::outline_top(nest.comment, inner)));
+            }
+            shown.push(Shown::Source(index));
+            for &(depth, nest) in &closes[index] {
+                let inner = comment::box_width(sides, depth, width_cols);
+                shown.extend(
+                    comment::outline_tail(nest.comment, inner)
+                        .into_iter()
+                        .map(|line| emit(depth, nest, line)),
+                );
+            }
+        }
+    }
+    comments
         .in_file(file)
         .into_iter()
-        .map(|(id, comment)| {
-            let under = comment.anchor.lines().map(|Lines { last, .. }| {
-                let shows = |row: &Row| row.source.is_some_and(|source| source.first <= last);
-                rows.iter().rposition(shows).unwrap_or(rows.len().saturating_sub(1))
-            });
-            (under, id, comment::card(comment, width))
+        .filter(|(_, comment)| comment.anchor.lines().is_none())
+        .flat_map(|(id, file_comment)| {
+            comment::card(file_comment, width)
+                .into_iter()
+                .map(move |line| Shown::Card { comment: id, line })
         })
-        .collect();
-    let carded = |under: Option<usize>| {
-        let cards = cards.iter().filter(move |(row, _, _)| *row == under);
-        cards.flat_map(|(_, id, lines)| {
-            lines.iter().map(|line| Shown::Card { comment: *id, line: line.clone() })
-        })
-    };
-    rows.iter()
-        .enumerate()
-        .flat_map(|(index, _)| std::iter::once(Shown::Source(index)).chain(carded(Some(index))))
-        .chain(carded(None))
-        .collect()
+        .for_each(|card| shown.push(card));
+    shown
+}
+
+fn flatten<'a>(
+    nests: &'a [comment::Nest<'a>],
+    depth: usize,
+    out: &mut Vec<(usize, &'a comment::Nest<'a>)>,
+) {
+    for nest in nests {
+        out.push((depth, nest));
+        flatten(&nest.children, depth + 1, out);
+    }
 }
 
 /// The first row on screen showing source line `line`, or the first after it when none does.
@@ -811,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn a_comment_s_card_sits_under_its_last_line_and_the_cursor_can_land_on_it() {
+    fn a_comment_outlines_its_lines_and_the_cursor_can_land_on_the_box() {
         let path = temp("cards").with_file_name("cards.rs");
         fs::write(&path, "a\nb\nc\n").unwrap();
         let mut doc = Doc::open(path.clone(), &Picker::halfblocks());
@@ -827,14 +895,48 @@ mod tests {
         });
         let shown: Vec<String> =
             doc.page(12, 10, &comments, 0).iter().map(Line::to_string).collect();
-        assert_eq!(shown, ["1 a", "2 b", "╭ L1–2 ────╮", "│ hm       │", "╰──────────╯", "3 c"]);
+        assert_eq!(
+            shown,
+            [
+                "╭ L1–2 ────╮",
+                "│ a        │",
+                "│ b        │",
+                "├──────────┤",
+                "│ hm       │",
+                "╰──────────╯",
+                "3 c",
+            ]
+        );
         assert_eq!(doc.comment_at_cursor(&comments), Some(0));
-        doc.move_cursor(3, 10);
-        assert_eq!((doc.selection(), doc.comment_at_cursor(&comments)), (None, Some(0)));
-        doc.move_cursor(2, 10);
+        doc.move_cursor(1, 10);
+        assert_eq!(doc.comment_at_cursor(&comments), Some(0));
+        doc.move_cursor(5, 10);
         assert_eq!(
             (doc.selection(), doc.comment_at_cursor(&comments)),
             (Some(Lines::one(3)), None)
         );
+    }
+
+    #[test]
+    fn a_comment_on_rendered_markdown_insets_the_lines() {
+        let path = temp("md comment").with_file_name("note.md");
+        fs::write(&path, "hello\n\nworld\n").unwrap();
+        let mut doc = Doc::open(path.clone(), &Picker::halfblocks());
+        let mut comments = Comments::default();
+        comments.add(comment::Comment {
+            file: path,
+            anchor: comment::Anchor::Lines {
+                lines: Lines { first: 1, last: 1 },
+                snippet: "hello".to_owned(),
+            },
+            text: "hi".to_owned(),
+            outdated: false,
+        });
+        let shown: Vec<String> =
+            doc.page(12, 10, &comments, 0).iter().map(Line::to_string).collect();
+        assert_eq!(shown[0], "╭ L1 ──────╮");
+        assert!(shown.iter().any(|row| row.starts_with("│ hello")));
+        assert!(shown.iter().any(|row| row.contains("hi")));
+        assert!(shown.iter().any(|row| row == "world"));
     }
 }

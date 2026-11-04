@@ -41,31 +41,37 @@ pub struct Row {
     /// How many of the line's spans lead it without being the file's text, like a line number
     /// or a bullet.
     pub chrome: usize,
+    /// How many of the line's spans trail it without being the file's text, like a box wall.
+    pub trail: usize,
 }
 
-/// The text of `line` past its first `chrome` spans.
-pub fn text(line: &Line, chrome: usize) -> String {
-    line.spans.iter().skip(chrome).map(|span| &*span.content).collect()
+/// The text of `line` past its first `chrome` spans and before its last `trail` spans.
+pub fn text(line: &Line, chrome: usize, trail: usize) -> String {
+    let end = line.spans.len().saturating_sub(trail);
+    line.spans.get(chrome..end).into_iter().flatten().map(|span| &*span.content).collect()
 }
 
 /// `line` with `style` patched onto the byte ranges `marked` of its text past the first `chrome`
-/// spans, splitting spans where a range starts or ends inside one.
+/// spans and before its last `trail` spans, splitting spans where a range starts or ends inside
+/// one.
 pub fn mark(
     line: Line<'static>,
     chrome: usize,
+    trail: usize,
     marked: &[Range<usize>],
     style: Style,
 ) -> Line<'static> {
     if marked.is_empty() {
         return line;
     }
+    let last = line.spans.len().saturating_sub(trail);
     let mut end = 0;
     let spans = line
         .spans
         .into_iter()
         .enumerate()
         .flat_map(|(index, span)| {
-            if index < chrome {
+            if index < chrome || index >= last {
                 return vec![span];
             }
             let start = end;
@@ -84,6 +90,31 @@ pub fn mark(
         })
         .collect();
     Line { spans, ..line }
+}
+
+/// `spans` cut into rows of at most `width` columns; an empty input is one empty row.
+pub fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
+    let mut rows = vec![Vec::new()];
+    let mut used = 0;
+    for span in spans {
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if used + ch_width > width && used > 0 {
+                rows.last_mut()
+                    .expect("rows start non-empty")
+                    .push(Span::styled(std::mem::take(&mut text), span.style));
+                rows.push(Vec::new());
+                used = 0;
+            }
+            text.push(ch);
+            used += ch_width;
+        }
+        if !text.is_empty() {
+            rows.last_mut().expect("rows start non-empty").push(Span::styled(text, span.style));
+        }
+    }
+    rows
 }
 
 /// `text` cut into pieces at most `width` columns wide, keeping an empty line as one piece.

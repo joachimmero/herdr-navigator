@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
-use crate::layout::{Lines, chunk};
+use crate::layout::{Lines, Row, chunk, wrap_spans};
 
 /// What in its file a comment is on.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,11 +200,218 @@ fn format(comment: &Comment, root: &Path) -> String {
     }
 }
 
-/// A comment as a card `width` columns wide: its lines, or `image` for a whole-file comment, in
-/// the top border, and its text inside.
-pub fn card(comment: &Comment, width: u16) -> Vec<Line<'static>> {
-    let width = usize::from(width).max(5);
-    let border = Style::new().fg(Color::Yellow);
+/// How a comment box takes columns on the left of the source.
+#[derive(Clone, Copy)]
+pub enum Sides {
+    /// The left wall replaces a line-number gutter of this many columns.
+    Gutter(usize),
+    /// The left wall is a pipe and a space, plus one pipe per extra nest.
+    Inset,
+}
+
+/// A line comment on `file`, with later overlapping comments nested inside earlier ones.
+pub struct Nest<'a> {
+    pub id: u64,
+    pub comment: &'a Comment,
+    pub children: Vec<Nest<'a>>,
+}
+
+impl Nest<'_> {
+    pub fn lines(&self) -> Lines {
+        self.comment.anchor.lines().expect("nests are line comments")
+    }
+
+    /// Its own lines and every nested comment's, so the box can close after the innermost.
+    pub fn drawn(&self) -> Lines {
+        self.children.iter().map(Self::drawn).fold(self.lines(), Lines::union)
+    }
+}
+
+/// Line comments on `file`, nested: a later comment that overlaps an earlier one sits inside it.
+pub fn nests<'a>(comments: &'a Comments, file: &Path) -> Vec<Nest<'a>> {
+    let mut roots = Vec::new();
+    for (id, comment) in comments.in_file(file) {
+        let Some(lines) = comment.anchor.lines() else { continue };
+        if !attach(&mut roots, id, comment, lines) {
+            roots.push(Nest { id, comment, children: Vec::new() });
+        }
+    }
+    roots
+}
+
+fn attach<'a>(nodes: &mut Vec<Nest<'a>>, id: u64, comment: &'a Comment, lines: Lines) -> bool {
+    for node in nodes.iter_mut().rev() {
+        if attach(&mut node.children, id, comment, lines) {
+            return true;
+        }
+        if node.lines().overlaps(lines) {
+            node.children.push(Nest { id, comment, children: Vec::new() });
+            return true;
+        }
+    }
+    false
+}
+
+/// How many boxes enclose each 1-based source line.
+pub fn depths(nests: &[Nest], lines: usize) -> Vec<usize> {
+    let mut depths = vec![0; lines];
+    for nest in nests {
+        paint(nest, 1, &mut depths);
+    }
+    depths
+}
+
+fn paint(nest: &Nest, depth: usize, depths: &mut [usize]) {
+    let lines = nest.drawn();
+    let len = depths.len();
+    let first = lines.first.min(len).saturating_sub(1);
+    let end = lines.last.min(len);
+    if let Some(slot) = depths.get_mut(first..end) {
+        for depth_at in slot {
+            *depth_at = (*depth_at).max(depth);
+        }
+    }
+    for child in &nest.children {
+        paint(child, depth + 1, depths);
+    }
+}
+
+/// Left and right wall columns at `depth`; both 0 when the line is not in a box.
+pub fn fills(sides: Sides, depth: usize) -> (usize, usize) {
+    if depth == 0 {
+        return (0, 0);
+    }
+    let left = match sides {
+        Sides::Gutter(gutter) => gutter + depth - 1,
+        Sides::Inset => depth + 1,
+    };
+    (left, depth + 1)
+}
+
+/// `content` padded to `inner` columns between walls of `depth`, `left_fill` columns on the left.
+pub fn box_row(
+    content: Vec<Span<'static>>,
+    depth: usize,
+    left_fill: usize,
+    inner: usize,
+    source: Option<Lines>,
+) -> Row {
+    box_row_with_lead(Vec::new(), content, depth, left_fill, inner, source)
+}
+
+fn box_row_with_lead(
+    lead: Vec<Span<'static>>,
+    content: Vec<Span<'static>>,
+    depth: usize,
+    left_fill: usize,
+    inner: usize,
+    source: Option<Lines>,
+) -> Row {
+    let lead_n = lead.len();
+    let mut mid = lead;
+    mid.extend(content);
+    let used: usize = mid.iter().map(Span::width).sum();
+    let pad = inner.saturating_sub(used);
+    let mut spans = vec![left_wall(depth, left_fill)];
+    spans.extend(mid);
+    spans.push(right_wall(depth, pad));
+    Row { line: Line::from(spans), source, chrome: 1 + lead_n, trail: 1 }
+}
+
+fn border() -> Style {
+    Style::new().fg(Color::Yellow)
+}
+
+fn left_wall(depth: usize, fill: usize) -> Span<'static> {
+    let pipes = "│".repeat(depth);
+    let pad = fill.saturating_sub(depth);
+    Span::styled(format!("{pipes}{}", " ".repeat(pad)), border())
+}
+
+fn right_wall(depth: usize, pad: usize) -> Span<'static> {
+    Span::styled(format!("{} {}", " ".repeat(pad), "│".repeat(depth)), border())
+}
+
+/// Wrap each row that sits in a comment's band in walls, rewrapping its text to the inner width.
+pub fn frame_rows(rows: Vec<Row>, width: u16, nests: &[Nest]) -> Vec<Row> {
+    if nests.is_empty() {
+        return rows;
+    }
+    let width = usize::from(width);
+    let depth = row_depths(&rows, nests);
+    rows.into_iter()
+        .enumerate()
+        .flat_map(|(index, row)| inset_row(row, depth[index], width))
+        .collect()
+}
+
+fn row_depths(rows: &[Row], nests: &[Nest]) -> Vec<usize> {
+    let mut depth = vec![0; rows.len()];
+    fn paint(nest: &Nest, d: usize, rows: &[Row], depth: &mut [usize]) {
+        if let Some((first, last)) = band(rows, nest.drawn()) {
+            for slot in depth.get_mut(first..=last).into_iter().flatten() {
+                *slot = (*slot).max(d);
+            }
+        }
+        for child in &nest.children {
+            paint(child, d + 1, rows, depth);
+        }
+    }
+    for nest in nests {
+        paint(nest, 1, rows, &mut depth);
+    }
+    depth
+}
+
+/// First and last row whose source overlaps `lines`, including the gaps between them.
+pub fn band(rows: &[Row], lines: Lines) -> Option<(usize, usize)> {
+    let hits = |row: &Row| row.source.is_some_and(|source| source.overlaps(lines));
+    Some((rows.iter().position(hits)?, rows.iter().rposition(hits)?))
+}
+
+fn inset_row(row: Row, depth: usize, width: usize) -> Vec<Row> {
+    if depth == 0 {
+        return vec![row];
+    }
+    let (left_fill, right_fill) = fills(Sides::Inset, depth);
+    let inner = width.saturating_sub(left_fill + right_fill).max(1);
+    let chrome = row.chrome.min(row.line.spans.len());
+    let lead = row.line.spans[..chrome].to_vec();
+    let content = row.line.spans[chrome..].to_vec();
+    let chrome_w: usize = lead.iter().map(Span::width).sum();
+    let text_w = inner.saturating_sub(chrome_w).max(1);
+    wrap_spans(&content, text_w)
+        .into_iter()
+        .enumerate()
+        .map(|(index, spans)| {
+            let lead =
+                if index == 0 { lead.clone() } else { vec![Span::raw(" ".repeat(chrome_w))] };
+            box_row_with_lead(lead, spans, depth, left_fill, inner, row.source)
+        })
+        .collect()
+}
+
+/// `line` of a box at `depth`, with the outer walls around it.
+pub fn framed(line: Line<'static>, depth: usize, sides: Sides) -> Line<'static> {
+    if depth <= 1 {
+        return line;
+    }
+    let ancestor = depth - 1;
+    let (left_fill, _) = fills(sides, ancestor);
+    let mut spans = vec![left_wall(ancestor, left_fill)];
+    spans.extend(line.spans);
+    spans.push(right_wall(ancestor, 0));
+    Line::from(spans)
+}
+
+/// Inner width of a box at `depth` in a pane `width` columns wide.
+pub fn box_width(sides: Sides, depth: usize, width: usize) -> usize {
+    let ancestor = depth.saturating_sub(1);
+    let (left, right) = fills(sides, ancestor);
+    width.saturating_sub(left + right).max(5)
+}
+
+fn title(comment: &Comment) -> String {
     let mut title = match comment.anchor.lines() {
         Some(Lines { first, last }) if first == last => format!("L{first}"),
         Some(Lines { first, last }) => format!("L{first}–{last}"),
@@ -213,24 +420,67 @@ pub fn card(comment: &Comment, width: u16) -> Vec<Line<'static>> {
     if comment.outdated {
         title.push_str(" · outdated");
     }
+    title
+}
+
+fn boxed_top(title: &str, width: usize) -> Line<'static> {
+    let width = width.max(5);
     let title_width = title.chars().count().min(width - 4);
     let title: String = title.chars().take(title_width).collect();
-    let top = vec![
-        Span::styled("╭ ", border),
-        Span::styled(title, border.add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" {}╮", "─".repeat(width - 4 - title_width)), border),
-    ];
+    Line::from(vec![
+        Span::styled("╭ ", border()),
+        Span::styled(title, border().add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {}╮", "─".repeat(width - 4 - title_width)), border()),
+    ])
+}
+
+fn boxed_bottom(width: usize) -> Line<'static> {
+    let width = width.max(5);
+    Line::styled(format!("╰{}╯", "─".repeat(width - 2)), border())
+}
+
+fn boxed_divider(width: usize) -> Line<'static> {
+    let width = width.max(5);
+    Line::styled(format!("├{}┤", "─".repeat(width - 2)), border())
+}
+
+fn boxed_body(comment: &Comment, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(5);
     let inner = width - 4;
-    let body = comment.text.split('\n').flat_map(|line| chunk(line, inner)).map(|line| {
-        let pad = inner.saturating_sub(line.chars().filter_map(UnicodeWidthChar::width).sum());
-        Line::from(vec![
-            Span::styled("│ ", border),
-            Span::raw(format!("{line}{}", " ".repeat(pad))),
-            Span::styled(" │", border),
-        ])
-    });
-    let bottom = Line::styled(format!("╰{}╯", "─".repeat(width - 2)), border);
-    std::iter::once(Line::from(top)).chain(body).chain([bottom]).collect()
+    comment
+        .text
+        .split('\n')
+        .flat_map(|line| chunk(line, inner))
+        .map(|line| {
+            let pad = inner.saturating_sub(line.chars().filter_map(UnicodeWidthChar::width).sum());
+            Line::from(vec![
+                Span::styled("│ ", border()),
+                Span::raw(format!("{line}{}", " ".repeat(pad))),
+                Span::styled(" │", border()),
+            ])
+        })
+        .collect()
+}
+
+/// A comment as a card `width` columns wide: its lines, or `image` for a whole-file comment, in
+/// the top border, and its text inside.
+pub fn card(comment: &Comment, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width);
+    std::iter::once(boxed_top(&title(comment), width))
+        .chain(boxed_body(comment, width))
+        .chain([boxed_bottom(width)])
+        .collect()
+}
+
+pub fn outline_top(comment: &Comment, width: usize) -> Line<'static> {
+    boxed_top(&title(comment), width)
+}
+
+pub fn outline_tail(comment: &Comment, width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![boxed_divider(width)];
+    lines.extend(boxed_body(comment, width));
+    lines.push(boxed_bottom(width));
+    lines
 }
 
 #[cfg(test)]
@@ -312,5 +562,29 @@ mod tests {
         let lines: Vec<String> =
             card(&comment(3, 5, ""), 14).iter().map(|line| line.to_string()).collect();
         assert_eq!(lines, ["╭ L3–5 ──────╮", "│ why?       │", "╰────────────╯"]);
+    }
+
+    #[test]
+    fn an_outline_puts_a_divider_between_the_lines_and_the_text() {
+        let tail: Vec<String> =
+            outline_tail(&comment(1, 2, ""), 12).iter().map(Line::to_string).collect();
+        assert_eq!(tail, ["├──────────┤", "│ why?     │", "╰──────────╯"]);
+        assert_eq!(outline_top(&comment(1, 2, ""), 12).to_string(), "╭ L1–2 ────╮");
+    }
+
+    #[test]
+    fn a_later_comment_nests_inside_an_earlier_one_it_overlaps() {
+        let mut comments = Comments::default();
+        comments.add(comment(1, 4, "a"));
+        comments.add(comment(2, 3, "b"));
+        comments.add(comment(3, 5, "c"));
+        let file = Path::new("/p/src/a.rs");
+        let roots = nests(&comments, file);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].lines(), Lines { first: 1, last: 4 });
+        assert_eq!(roots[0].children.len(), 1);
+        assert_eq!(roots[0].children[0].lines(), Lines { first: 2, last: 3 });
+        assert_eq!(roots[0].children[0].children[0].lines(), Lines { first: 3, last: 5 });
+        assert_eq!(roots[0].drawn(), Lines { first: 1, last: 5 });
     }
 }
