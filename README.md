@@ -107,8 +107,9 @@ In the tree:
 | `r` | Look for files again |
 | `q` | Close the pane |
 
-The cursor and the selection are marked in the margin, and the title bar shows the source lines
-they cover, so in rendered markdown you can see which lines of the file a paragraph came from.
+A selection fills its source rows across the pane. The cursor and the selection are marked in
+the margin, and the title bar shows the source lines they cover, so in rendered markdown you can
+see which lines of the file a paragraph came from.
 
 Dragging over the file copies the text as it's shown, without line numbers or bullets, a line
 break at the end of each row on screen. Dragging past the top or bottom scrolls. The copied text

@@ -225,8 +225,9 @@ fn tree_row(tree: &Tree, row: &Row, selected: bool, focused: bool) -> Line<'stat
     }
 }
 
-/// Draw the file, its cursor and selection marked in the margin and the comment box under the
-/// selection while there is one, and return its part of the title bar's status.
+/// Draw the file, its selection filling each source row, its cursor and selection marked in the
+/// margin and the comment box under the selection while there is one, and return its part of the
+/// title bar's status.
 fn draw_doc(
     frame: &mut Frame,
     doc: &mut Doc,
@@ -260,7 +261,20 @@ fn draw_doc(
         })
         .collect();
     let shown = lines.len();
+    let selected_source: Vec<bool> = (doc.scroll..doc.scroll + shown)
+        .map(|index| doc.is_selecting() && doc.is_selected(index) && doc.chrome(index).is_some())
+        .collect();
     frame.render_widget(Paragraph::new(lines), area);
+    let fill = Style::new().add_modifier(Modifier::REVERSED);
+    for (row, &selected) in selected_source.iter().enumerate() {
+        if !selected {
+            continue;
+        }
+        let y = area.y.saturating_add(u16::try_from(row).unwrap_or(u16::MAX));
+        if y < area.bottom() {
+            frame.buffer_mut().set_style(Rect { y, height: 1, ..area }, fill);
+        }
+    }
     if let Some(composer) = composer {
         let below = u16::try_from(doc.selection_end() + 1 - doc.scroll).unwrap_or(u16::MAX);
         let y = area.y.saturating_add(below).min(area.bottom().saturating_sub(box_height));
@@ -268,12 +282,18 @@ fn draw_doc(
         draw_composer(frame, composer, comments, rect);
     }
 
-    let mark = if focused { Style::new().fg(Color::Cyan) } else { dim() };
+    let cursor_bar = if focused {
+        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::Cyan).add_modifier(Modifier::DIM)
+    };
+    let selection_bar = if focused { Style::new() } else { dim() };
     let pointed = Style::new().fg(Color::Magenta);
     let marks: Vec<Line> = (doc.scroll..doc.scroll + shown)
-        .map(|index| match (index == doc.cursor(), doc.is_selected(index), doc.is_pointed(index)) {
-            (true, _, _) => Line::styled("▌", mark.add_modifier(Modifier::BOLD)),
-            (false, true, _) => Line::styled("▎", mark),
+        .zip(&selected_source)
+        .map(|(index, selected)| match (index == doc.cursor(), *selected, doc.is_pointed(index)) {
+            (true, _, _) => Line::styled("▌", cursor_bar),
+            (false, true, _) => Line::styled("▌", selection_bar),
             (false, false, true) => Line::styled("▎", pointed),
             (false, false, false) => Line::raw(""),
         })
